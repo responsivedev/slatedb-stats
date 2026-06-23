@@ -27,6 +27,13 @@ def get(url):
         return json.load(r)
 
 
+def date_already_recorded(path, stamp):
+    if not path.exists():
+        return False
+    with open(path, newline="") as f:
+        return any(r and r[0] == stamp for r in csv.reader(f))
+
+
 def append_row(path, header, row):
     new = not path.exists()
     with open(path, "a", newline="") as f:
@@ -43,16 +50,21 @@ def main():
     crate = get(f"https://crates.io/api/v1/crates/{CRATE}")
     downloads = get(f"https://crates.io/api/v1/crates/{CRATE}/downloads")
 
-    # archive the raw daily snapshot (idempotent per day)
+    # archive the raw daily snapshot (overwrites on a same-day re-run)
     (SNAPS / f"{stamp}.json").write_text(json.dumps(downloads, separators=(",", ":")))
 
     total = crate["crate"]["downloads"]
     recent = crate["crate"].get("recent_downloads")
-    append_row(DATA / "slatedb_monthly.csv",
-               ["date", "cumulative_total", "recent_90d"],
-               [stamp, total, recent])
 
-    # per-version cumulative totals (wide history in one file)
+    # idempotent per date: don't append a second row if today is already recorded
+    monthly = DATA / "slatedb_monthly.csv"
+    if date_already_recorded(monthly, stamp):
+        print(f"{stamp} already recorded; refreshed snapshot only "
+              f"(cumulative_total={total:,})")
+        return
+
+    append_row(monthly, ["date", "cumulative_total", "recent_90d"],
+               [stamp, total, recent])
     for v in crate["versions"]:
         append_row(DATA / "slatedb_versions_monthly.csv",
                    ["date", "version", "cumulative_downloads"],

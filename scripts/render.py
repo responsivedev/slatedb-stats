@@ -246,7 +246,7 @@ h1{font-size:22px;font-weight:650;margin:0 0 2px;letter-spacing:-.01em}
 h2{font-size:14px;font-weight:600;margin:34px 0 4px}.note{font-size:12px;color:var(--mut);margin:0 0 14px}
 .box{border:1px solid var(--line);border-radius:10px;padding:16px 14px 10px;overflow-x:auto}
 svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#eee}.axis{stroke:var(--line)}
-.foot{color:var(--mut);font-size:11px;margin-top:32px}
+.foot{color:var(--mut);font-size:11px;margin-top:32px}.foot a{color:var(--mut)}
 .empty{color:var(--mut);font-size:13px;padding:24px 8px;text-align:center}
 </style></head><body><div class="wrap">
 <h1>slatedb &mdash; crates.io downloads</h1>
@@ -324,7 +324,7 @@ ar+=` L ${x(D.length-1)} ${m.t+ih} Z`;
 svg.appendChild(el('path',{d:ar,fill:'#2f6f4f',opacity:.10}));
 svg.appendChild(el('path',{d:pa,fill:'none',stroke:'#2f6f4f','stroke-width':1.5}));
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
-[0,Math.floor(D.length/2),D.length-1].forEach(i=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':'middle'})).textContent=D[i][0]);})();
+const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);})();
 
 // 90-day window growth fit — only shown once enough windows have accumulated
 (function(){const enough=P.enough_windows||6,Wd=P.windows;
@@ -347,7 +347,7 @@ svg.appendChild(el('text',{class:'tk',x:x(i),y:H-26,'text-anchor':'middle'})).te
 if(P.fit)svg.appendChild(el('text',{class:'tk',x:W-m.r,y:m.t+10,'text-anchor':'end','font-weight':600})).textContent=`R² ${P.fit.r2.toFixed(3)}`;
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
 
-document.getElementById('foot').textContent='Source: crates.io API. Long-run history is preserved by the monthly snapshots committed to this repo.';
+document.getElementById('foot').innerHTML='Source: <a href="https://crates.io/crates/slatedb">crates.io</a>';
 </script></body></html>"""
 
 

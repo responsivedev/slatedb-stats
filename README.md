@@ -32,7 +32,7 @@ Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
 ## Current numbers
 
 <!--STATS-->
-_Updated 2026-06-23 18:36 UTC_
+_Updated 2026-06-23 18:38 UTC_
 
 - All-time downloads: **453,849**
 - Daily history reconstructed: **90 days**

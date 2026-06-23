@@ -12,9 +12,10 @@ and regenerates the dashboard in `docs/`. crates.io only keeps daily data for
 
 To tell whether slatedb adoption is on an exponential trajectory, you need a
 multi-year monthly series - a single quarter can't distinguish flat from
-exponential (even Kafka, which grew at R²=0.996 / ~14% per 90-day window from
-2016-2022, had plenty of flat-looking individual quarters). This repo builds
-that series.
+exponential, because month-to-month noise and seasonal dips swamp the trend
+over short spans. This repo builds that series. Exponential growth is a
+straight line on a log axis, so the test is simple: fit ln(volume) over
+consecutive 90-day windows and see how close R² gets to 1.
 
 ## Layout
 
@@ -29,10 +30,8 @@ Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
 
 ## Current numbers
 
-## Current numbers
-
 <!--STATS-->
-_Updated 2026-06-23 18:38 UTC_
+_Updated 2026-06-23 18:44 UTC_
 
 - All-time downloads: **453,849**
 - Daily history reconstructed: **90 days**

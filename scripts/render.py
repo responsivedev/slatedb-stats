@@ -6,10 +6,10 @@ Reads the captured CSV + daily snapshots, then writes:
   * docs/index.html          - self-contained dashboard (GitHub Pages)
   * README.md                - regenerated stats block between the markers
 
-The "is it exponential?" test mirrors the Kafka anchor analysis: bucket the
-daily series into consecutive 90-day windows, fit ln(volume) ~ a + b*t, and
-report R^2 and the implied per-window growth. Kafka's new-client downloads
-scored R^2=0.996 at ~14%/window over 2016-2022 - that's the reference line.
+The "is it exponential?" test: bucket the daily series into consecutive 90-day
+windows, fit ln(volume) ~ a + b*t, and report R^2. Exponential growth is a
+straight line on a log axis, so R^2 = 1 is the ideal target; the closer the
+fit gets to 1, the cleaner the exponential trend.
 
 Pure stdlib.
 """
@@ -21,9 +21,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 SNAPS = DATA / "snapshots"
 DOCS = ROOT / "docs"
-
-# Kafka anchor (from the 2016-2022 "Kafka (new) Clients Total" analysis)
-KAFKA = {"r2": 0.996, "growth90": 0.139, "label": "Kafka new clients 2016-22"}
 
 
 def load_daily():
@@ -126,7 +123,6 @@ def main():
         "windows": wins,
         "fit": fit,
         "cumulative": cumulative,
-        "kafka": KAFKA,
         "latest_total": latest_total,
     }
 
@@ -144,14 +140,14 @@ def render_html(p):
         verdict = (f"<b>{fit['n']} full 90-day windows so far.</b> Log-linear fit: "
                    f"R&sup2; = {fit['r2']:.3f}, implied growth "
                    f"{fit['growth90']*100:+.1f}%/window. "
-                   f"Kafka's anchor was R&sup2; {p['kafka']['r2']} at "
-                   f"{p['kafka']['growth90']*100:+.0f}%/window.")
+                   f"<b>R&sup2; = 1.000 is the exponential target</b> &mdash; the closer "
+                   f"this gets to 1, the cleaner the exponential trend.")
     else:
         need = max(0, 6 - len(p["windows"]))
         verdict = (f"<b>Accumulating.</b> Have {len(p['windows'])} full 90-day window(s); "
                    f"need ~{need} more before an exponential fit is meaningful. "
-                   f"Kafka's anchor: R&sup2; {p['kafka']['r2']} at "
-                   f"{p['kafka']['growth90']*100:+.0f}%/90 days over 2016-2022.")
+                   f"The target is <b>R&sup2; = 1.000</b>: on a log axis a pure "
+                   f"exponential is a perfectly straight line.")
     return HTML.replace("/*DATA*/", json.dumps(p)).replace("<!--VERDICT-->", verdict)
 
 
@@ -195,9 +191,10 @@ and regenerates the dashboard in `docs/`. crates.io only keeps daily data for
 
 To tell whether slatedb adoption is on an exponential trajectory, you need a
 multi-year monthly series - a single quarter can't distinguish flat from
-exponential (even Kafka, which grew at R²=0.996 / ~14% per 90-day window from
-2016-2022, had plenty of flat-looking individual quarters). This repo builds
-that series.
+exponential, because month-to-month noise and seasonal dips swamp the trend
+over short spans. This repo builds that series. Exponential growth is a
+straight line on a log axis, so the test is simple: fit ln(volume) over
+consecutive 90-day windows and see how close R² gets to 1.
 
 ## Layout
 
@@ -209,9 +206,6 @@ that series.
 - `scripts/capture.py` / `scripts/render.py` - the two job steps
 
 Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
-
-## Current numbers
-
 """
 
 # --- self-contained dashboard template (inline SVG, no external deps) ---
@@ -219,7 +213,7 @@ HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>slatedb downloads</title>
 <style>
-:root{--ink:#1a1a1a;--mut:#6b6b6b;--line:#d8d8d8;--accent:#2f6f4f;--kafka:#b04a2f;}
+:root{--ink:#1a1a1a;--mut:#6b6b6b;--line:#d8d8d8;--accent:#2f6f4f;--fit:#b04a2f;}
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 .wrap{max-width:960px;margin:0 auto;padding:32px 20px 64px}
 h1{font-size:22px;font-weight:650;margin:0 0 2px;letter-spacing:-.01em}
@@ -246,7 +240,7 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 <p class="note">All snapshots merged and deduped. Weekly sawtooth = weekday vs weekend (CI traffic).</p>
 <div class="box"><svg id="daily" width="920" height="240"></svg><div id="daily-empty"></div></div>
 <h2>90-day window exponential test</h2>
-<p class="note">Consecutive 90-day windows on a log axis. A pure exponential is a straight line. The <span style="color:var(--kafka);font-weight:600">red dashed</span> line is the Kafka anchor slope (+14%/window).</p>
+<p class="note">Consecutive 90-day windows on a log axis. A pure exponential is a perfectly straight line (R&sup2;&nbsp;=&nbsp;1). The <span style="color:var(--fit);font-weight:600">red dashed</span> line is the best-fit exponential through slatedb's own windows; how tightly the points hug it is the R&sup2; reported above.</p>
 <div class="box"><svg id="windows" width="920" height="260"></svg><div id="windows-empty"></div></div>
 <div class="foot" id="foot"></div>
 </div>
@@ -296,24 +290,24 @@ svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
 // 90d windows log scale
 (function(){const svg=document.getElementById('windows'),W=920,H=260,m={t:12,r:14,b:42,l:54};
 const Wd=P.windows;if(Wd.length<2){document.getElementById('windows-empty').className='empty';
-document.getElementById('windows-empty').textContent=`${Wd.length} window(s) so far — the exponential test needs ~6. Kafka anchor: R² ${P.kafka.r2}, ${(P.kafka.growth90*100).toFixed(0)}%/window.`;svg.remove();return;}
+document.getElementById('windows-empty').textContent=`${Wd.length} window(s) so far — the exponential test needs ~6. Target: R² = 1.000 (a perfectly straight line on this log axis).`;svg.remove();return;}
 const iw=W-m.l-m.r,ih=H-m.t-m.b;const vals=Wd.map(w=>w.total);
 const lo=Math.log10(Math.max(1,Math.min(...vals)*0.8)),hi=Math.log10(Math.max(...vals)*1.25);
 const x=i=>m.l+iw*i/(Wd.length-1),y=v=>m.t+ih-ih*(Math.log10(v)-lo)/(hi-lo);
 const ticks=[];for(let e=Math.floor(lo);e<=Math.ceil(hi);e++){[1,2,5].forEach(mul=>{const v=mul*10**e;if(Math.log10(v)>=lo&&Math.log10(v)<=hi)ticks.push(v);});}
 ticks.forEach(v=>{const yy=y(v);svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
 svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=v>=1e6?(v/1e6+'M'):v>=1e3?(v/1e3+'k'):v;});
-// kafka anchor slope anchored at first window
-const g=Math.log10(1+P.kafka.growth90);let kp=`M ${x(0)} ${y(vals[0])}`;
-for(let i=1;i<Wd.length;i++)kp+=` L ${x(i)} ${y(vals[0]*Math.pow(10,g*i))}`;
-svg.appendChild(el('path',{d:kp,fill:'none',stroke:'#b04a2f','stroke-width':1.3,'stroke-dasharray':'5 4'}));
+// best-fit exponential through slatedb's own windows (fit is in natural log: ln(y)=a+b*t)
+if(P.fit){let kp=`M ${x(0)} ${y(Math.exp(P.fit.a))}`;
+for(let i=1;i<Wd.length;i++)kp+=` L ${x(i)} ${y(Math.exp(P.fit.a+P.fit.b*i))}`;
+svg.appendChild(el('path',{d:kp,fill:'none',stroke:'#b04a2f','stroke-width':1.3,'stroke-dasharray':'5 4'}));}
 let lp=`M ${x(0)} ${y(vals[0])}`;Wd.forEach((w,i)=>{if(i)lp+=` L ${x(i)} ${y(w.total)}`;});
 svg.appendChild(el('path',{d:lp,fill:'none',stroke:'#2f6f4f','stroke-width':1.4}));
 Wd.forEach((w,i)=>{svg.appendChild(el('circle',{cx:x(i),cy:y(w.total),r:3.2,fill:'#2f6f4f'}));
 svg.appendChild(el('text',{class:'tk',x:x(i),y:H-26,'text-anchor':'middle'})).textContent=w.start.slice(2,7);});
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
 
-document.getElementById('foot').textContent='Source: crates.io API. Daily data older than ~90 days exists only because it was snapshotted here. Anchor: Kafka (new) client downloads, 2016-2022.';
+document.getElementById('foot').textContent='Source: crates.io API. Daily data older than ~90 days exists only because it was snapshotted here. Exponential target: R² = 1 (a straight line on a log axis).';
 </script></body></html>"""
 
 

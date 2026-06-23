@@ -255,7 +255,7 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 
 <h2>Monthly download volume</h2>
 <p class="note">Downloads per calendar month. Hollow bars are partial months (incomplete data at the edges of the captured window).</p>
-<div class="box"><svg id="months" width="920" height="280"></svg><div id="months-empty"></div></div>
+<div class="box"><svg id="months" width="920" height="280" viewBox="0 0 920 280"></svg><div id="months-empty"></div></div>
 
 <h2>Most-downloaded versions (all-time)</h2>
 <p class="note">Cumulative downloads per release since publication.</p>
@@ -263,12 +263,12 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 
 <h2>Daily downloads (last 90 days)</h2>
 <p class="note">Weekly sawtooth = weekday vs weekend (CI traffic).</p>
-<div class="box"><svg id="daily" width="920" height="240"></svg><div id="daily-empty"></div></div>
+<div class="box"><svg id="daily" width="920" height="240" viewBox="0 0 920 240"></svg><div id="daily-empty"></div></div>
 
 <section id="winsec" hidden>
 <h2>90-day-window growth fit</h2>
 <p class="note">Consecutive 90-day windows on a log axis. A pure exponential is a perfectly straight line (R&sup2;&nbsp;=&nbsp;1). The <span style="color:var(--fit);font-weight:600">red dashed</span> line is the best-fit exponential through slatedb's own windows.</p>
-<div class="box"><svg id="windows" width="920" height="260"></svg></div>
+<div class="box"><svg id="windows" width="920" height="260" viewBox="0 0 920 260"></svg></div>
 </section>
 
 <div class="foot" id="foot"></div>

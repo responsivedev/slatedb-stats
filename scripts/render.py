@@ -97,6 +97,31 @@ def load_cumulative():
     return [{"date": r["date"], "total": int(r["cumulative_total"])} for r in rows]
 
 
+def load_versions():
+    """All-time downloads per version, from the latest raw crate snapshot.
+
+    Falls back to the per-version CSV's most recent date if no crate snapshot
+    exists. Sorted most-downloaded first.
+    """
+    crate_dir = SNAPS / "crate"
+    files = sorted(crate_dir.glob("*.json")) if crate_dir.exists() else []
+    if files:
+        d = json.loads(files[-1].read_text())
+        vs = [(v["num"], v["downloads"]) for v in d.get("versions", [])]
+    else:
+        p = DATA / "slatedb_versions_monthly.csv"
+        if not p.exists():
+            return []
+        rows = list(csv.DictReader(open(p)))
+        if not rows:
+            return []
+        latest = max(r["date"] for r in rows)
+        vs = [(r["version"], int(r["cumulative_downloads"]))
+              for r in rows if r["date"] == latest]
+    vs.sort(key=lambda x: x[1], reverse=True)
+    return [{"num": n, "downloads": dl} for n, dl in vs]
+
+
 def main():
     DOCS.mkdir(exist_ok=True)
     daily = load_daily()
@@ -122,8 +147,9 @@ def main():
         "months": months,
         "windows": wins,
         "fit": fit,
-        "cumulative": cumulative,
+        "versions": load_versions(),
         "latest_total": latest_total,
+        "enough_windows": 6,   # show the exponential-test chart only past this
     }
 
     DOCS.joinpath("data.json").write_text(json.dumps(payload, separators=(",", ":")))
@@ -131,24 +157,12 @@ def main():
     update_readme(payload, len(full_months), len(wins))
     print(f"rendered: {len(daily)} daily pts, {len(months)} months "
           f"({len(full_months)} full), {len(wins)} 90d windows, "
+          f"{len(payload['versions'])} versions, "
           f"fit={'R2=%.3f' % fit['r2'] if fit else 'pending'}")
 
 
 def render_html(p):
-    fit = p["fit"]
-    if fit:
-        verdict = (f"<b>{fit['n']} full 90-day windows so far.</b> Log-linear fit: "
-                   f"R&sup2; = {fit['r2']:.3f}, implied growth "
-                   f"{fit['growth90']*100:+.1f}%/window. "
-                   f"<b>R&sup2; = 1.000 is the exponential target</b> &mdash; the closer "
-                   f"this gets to 1, the cleaner the exponential trend.")
-    else:
-        need = max(0, 6 - len(p["windows"]))
-        verdict = (f"<b>Accumulating.</b> Have {len(p['windows'])} full 90-day window(s); "
-                   f"need ~{need} more before an exponential fit is meaningful. "
-                   f"The target is <b>R&sup2; = 1.000</b>: on a log axis a pure "
-                   f"exponential is a perfectly straight line.")
-    return HTML.replace("/*DATA*/", json.dumps(p)).replace("<!--VERDICT-->", verdict)
+    return HTML.replace("/*DATA*/", json.dumps(p))
 
 
 def update_readme(p, nfull, nwin):
@@ -225,31 +239,38 @@ HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 .wrap{max-width:960px;margin:0 auto;padding:32px 20px 64px}
 h1{font-size:22px;font-weight:650;margin:0 0 2px;letter-spacing:-.01em}
-.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
-.verdict{border:1px solid #cfe3d6;background:#f1f8f3;border-radius:10px;padding:14px 16px;margin:0 0 26px;font-size:14px}
-.cards{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0 28px}
-.card{flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.card .n{font-size:20px;font-weight:650;letter-spacing:-.02em}
-.card .l{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin-top:3px}
-h2{font-size:14px;font-weight:600;margin:32px 0 4px}.note{font-size:12px;color:var(--mut);margin:0 0 14px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:24px}
+.headline{margin:6px 0 34px}
+.hn{font-size:38px;font-weight:680;letter-spacing:-.02em}
+.hl{color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.05em;margin-left:10px}
+h2{font-size:14px;font-weight:600;margin:34px 0 4px}.note{font-size:12px;color:var(--mut);margin:0 0 14px}
 .box{border:1px solid var(--line);border-radius:10px;padding:16px 14px 10px;overflow-x:auto}
 svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#eee}.axis{stroke:var(--line)}
-.foot{color:var(--mut);font-size:11px;margin-top:28px}
+.foot{color:var(--mut);font-size:11px;margin-top:32px}
 .empty{color:var(--mut);font-size:13px;padding:24px 8px;text-align:center}
 </style></head><body><div class="wrap">
 <h1>slatedb &mdash; crates.io downloads</h1>
 <div class="sub" id="sub"></div>
-<div class="verdict"><!--VERDICT--></div>
-<div class="cards" id="cards"></div>
+<div class="headline"><span class="hn" id="alltime"></span><span class="hl">all-time downloads</span></div>
+
 <h2>Monthly download volume</h2>
-<p class="note">Downloads per calendar month from the reconstructed daily series. Hollow bars are partial months (incomplete data at the edges of the 90-day window).</p>
+<p class="note">Downloads per calendar month. Hollow bars are partial months (incomplete data at the edges of the captured window).</p>
 <div class="box"><svg id="months" width="920" height="280"></svg><div id="months-empty"></div></div>
-<h2>Daily downloads (reconstructed history)</h2>
-<p class="note">All snapshots merged and deduped. Weekly sawtooth = weekday vs weekend (CI traffic).</p>
+
+<h2>Most-downloaded versions (all-time)</h2>
+<p class="note">Cumulative downloads per release since publication.</p>
+<div class="box"><svg id="versions" width="920" height="320"></svg><div id="versions-empty"></div></div>
+
+<h2>Daily downloads (last 90 days)</h2>
+<p class="note">Weekly sawtooth = weekday vs weekend (CI traffic).</p>
 <div class="box"><svg id="daily" width="920" height="240"></svg><div id="daily-empty"></div></div>
-<h2>90-day window exponential test</h2>
-<p class="note">Consecutive 90-day windows on a log axis. A pure exponential is a perfectly straight line (R&sup2;&nbsp;=&nbsp;1). The <span style="color:var(--fit);font-weight:600">red dashed</span> line is the best-fit exponential through slatedb's own windows; how tightly the points hug it is the R&sup2; reported above.</p>
-<div class="box"><svg id="windows" width="920" height="260"></svg><div id="windows-empty"></div></div>
+
+<section id="winsec" hidden>
+<h2>90-day-window growth fit</h2>
+<p class="note">Consecutive 90-day windows on a log axis. A pure exponential is a perfectly straight line (R&sup2;&nbsp;=&nbsp;1). The <span style="color:var(--fit);font-weight:600">red dashed</span> line is the best-fit exponential through slatedb's own windows.</p>
+<div class="box"><svg id="windows" width="920" height="260"></svg></div>
+</section>
+
 <div class="foot" id="foot"></div>
 </div>
 <script>
@@ -257,14 +278,8 @@ const P=/*DATA*/;
 const NS="http://www.w3.org/2000/svg";
 const el=(n,a)=>{const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);return e;};
 const fmt=n=>Math.round(n).toLocaleString();
-document.getElementById('sub').textContent=`generated ${P.generated} · ${P.daily.length} daily points · ${P.months.length} months`;
-const cards=document.getElementById('cards');
-const fullMonths=P.months.filter(m=>!m.partial);
-const addCard=(n,l)=>{const c=document.createElement('div');c.className='card';c.innerHTML=`<div class="n">${n}</div><div class="l">${l}</div>`;cards.appendChild(c);};
-addCard(P.latest_total.toLocaleString(),'all-time downloads');
-addCard(P.daily.length,'days reconstructed');
-addCard(fullMonths.length,'full months');
-addCard(P.fit?`R² ${P.fit.r2.toFixed(3)}`:'—','exp fit (90d)');
+document.getElementById('sub').textContent=`Organic adoption on crates.io · updated ${P.generated}`;
+document.getElementById('alltime').textContent=P.latest_total.toLocaleString();
 
 // monthly bars
 (function(){const svg=document.getElementById('months'),W=920,H=280,m={t:12,r:14,b:54,l:54};
@@ -278,6 +293,22 @@ M.forEach((d,i)=>{const h=ih*d.total/maxR,x=m.l+i*bw+(bw-bar)/2,yy=m.t+ih-h;
 svg.appendChild(el('rect',{x,y:yy,width:bar,height:h,rx:2,fill:d.partial?'#fff':'#3a3a3a',stroke:'#3a3a3a','stroke-width':d.partial?1:0,'stroke-dasharray':d.partial?'3 2':''}));
 svg.appendChild(el('text',{class:'tk',x:x+bar/2,y:H-40,'text-anchor':'end',transform:`rotate(-50 ${x+bar/2} ${H-40})`})).textContent=d.month;});
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
+
+// version distribution (horizontal bars, top N + other)
+(function(){const svg=document.getElementById('versions');
+const V=P.versions||[];if(!V.length){document.getElementById('versions-empty').className='empty';document.getElementById('versions-empty').textContent='No version data yet.';svg.remove();return;}
+const total=V.reduce((s,v)=>s+v.downloads,0),TOP=12;
+let rows=V.slice(0,TOP).map(v=>({num:v.num,dl:v.downloads}));
+const rest=V.slice(TOP).reduce((s,v)=>s+v.downloads,0);
+if(rest>0)rows.push({num:`other (${V.length-TOP})`,dl:rest,other:true});
+const W=920,rh=24,m={t:8,r:96,b:8,l:64},iw=W-m.l-m.r,H=m.t+m.b+rows.length*rh;
+svg.setAttribute('height',H);svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+const max=Math.max(...rows.map(r=>r.dl)),bar=rh*0.62;
+rows.forEach((r,i)=>{const y=m.t+i*rh,bw=Math.max(iw*r.dl/max,1),pct=r.dl/total*100;
+svg.appendChild(el('text',{class:'tk',x:m.l-6,y:y+bar*0.78,'text-anchor':'end'})).textContent=r.num;
+svg.appendChild(el('rect',{x:m.l,y,width:bw,height:bar,rx:2,fill:r.other?'#bcbcbc':'#3a3a3a'}));
+svg.appendChild(el('text',{class:'tk',x:m.l+bw+6,y:y+bar*0.78})).textContent=`${fmt(r.dl)} · ${pct.toFixed(pct<10?1:0)}%`;});
+})();
 
 // daily line
 (function(){const svg=document.getElementById('daily'),W=920,H=240,m={t:12,r:14,b:28,l:48};
@@ -295,17 +326,17 @@ svg.appendChild(el('path',{d:pa,fill:'none',stroke:'#2f6f4f','stroke-width':1.5}
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
 [0,Math.floor(D.length/2),D.length-1].forEach(i=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':'middle'})).textContent=D[i][0]);})();
 
-// 90d windows log scale
-(function(){const svg=document.getElementById('windows'),W=920,H=260,m={t:12,r:14,b:42,l:54};
-const Wd=P.windows;if(Wd.length<2){document.getElementById('windows-empty').className='empty';
-document.getElementById('windows-empty').textContent=`${Wd.length} window(s) so far — the exponential test needs ~6. Target: R² = 1.000 (a perfectly straight line on this log axis).`;svg.remove();return;}
-const iw=W-m.l-m.r,ih=H-m.t-m.b;const vals=Wd.map(w=>w.total);
+// 90-day window growth fit — only shown once enough windows have accumulated
+(function(){const enough=P.enough_windows||6,Wd=P.windows;
+if(!Wd||Wd.length<enough)return;
+document.getElementById('winsec').hidden=false;
+const svg=document.getElementById('windows'),W=920,H=260,m={t:12,r:14,b:42,l:54};
+const iw=W-m.l-m.r,ih=H-m.t-m.b,vals=Wd.map(w=>w.total);
 const lo=Math.log10(Math.max(1,Math.min(...vals)*0.8)),hi=Math.log10(Math.max(...vals)*1.25);
 const x=i=>m.l+iw*i/(Wd.length-1),y=v=>m.t+ih-ih*(Math.log10(v)-lo)/(hi-lo);
 const ticks=[];for(let e=Math.floor(lo);e<=Math.ceil(hi);e++){[1,2,5].forEach(mul=>{const v=mul*10**e;if(Math.log10(v)>=lo&&Math.log10(v)<=hi)ticks.push(v);});}
 ticks.forEach(v=>{const yy=y(v);svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
 svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=v>=1e6?(v/1e6+'M'):v>=1e3?(v/1e3+'k'):v;});
-// best-fit exponential through slatedb's own windows (fit is in natural log: ln(y)=a+b*t)
 if(P.fit){let kp=`M ${x(0)} ${y(Math.exp(P.fit.a))}`;
 for(let i=1;i<Wd.length;i++)kp+=` L ${x(i)} ${y(Math.exp(P.fit.a+P.fit.b*i))}`;
 svg.appendChild(el('path',{d:kp,fill:'none',stroke:'#b04a2f','stroke-width':1.3,'stroke-dasharray':'5 4'}));}
@@ -313,9 +344,10 @@ let lp=`M ${x(0)} ${y(vals[0])}`;Wd.forEach((w,i)=>{if(i)lp+=` L ${x(i)} ${y(w.t
 svg.appendChild(el('path',{d:lp,fill:'none',stroke:'#2f6f4f','stroke-width':1.4}));
 Wd.forEach((w,i)=>{svg.appendChild(el('circle',{cx:x(i),cy:y(w.total),r:3.2,fill:'#2f6f4f'}));
 svg.appendChild(el('text',{class:'tk',x:x(i),y:H-26,'text-anchor':'middle'})).textContent=w.start.slice(2,7);});
+if(P.fit)svg.appendChild(el('text',{class:'tk',x:W-m.r,y:m.t+10,'text-anchor':'end','font-weight':600})).textContent=`R² ${P.fit.r2.toFixed(3)}`;
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
 
-document.getElementById('foot').textContent='Source: crates.io API. Daily data older than ~90 days exists only because it was snapshotted here. Exponential target: R² = 1 (a straight line on a log axis).';
+document.getElementById('foot').textContent='Source: crates.io API. Long-run history is preserved by the monthly snapshots committed to this repo.';
 </script></body></html>"""
 
 

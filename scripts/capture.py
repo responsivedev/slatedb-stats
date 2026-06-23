@@ -19,6 +19,8 @@ UA = os.environ.get("CRATES_UA", "slatedb-stats (https://github.com/responsivede
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 SNAPS = DATA / "snapshots"
+DL_SNAPS = SNAPS / "downloads"   # raw /downloads responses (daily, last 90d)
+CRATE_SNAPS = SNAPS / "crate"    # raw crate-metadata responses (cumulative totals)
 
 
 def get(url):
@@ -44,14 +46,17 @@ def append_row(path, header, row):
 
 
 def main():
-    SNAPS.mkdir(parents=True, exist_ok=True)
+    DL_SNAPS.mkdir(parents=True, exist_ok=True)
+    CRATE_SNAPS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
     crate = get(f"https://crates.io/api/v1/crates/{CRATE}")
     downloads = get(f"https://crates.io/api/v1/crates/{CRATE}/downloads")
 
-    # archive the raw daily snapshot (overwrites on a same-day re-run)
-    (SNAPS / f"{stamp}.json").write_text(json.dumps(downloads, separators=(",", ":")))
+    # archive BOTH raw responses verbatim so everything is reconstructable from
+    # data/snapshots alone (overwrites on a same-day re-run).
+    (DL_SNAPS / f"{stamp}.json").write_text(json.dumps(downloads, separators=(",", ":")))
+    (CRATE_SNAPS / f"{stamp}.json").write_text(json.dumps(crate, separators=(",", ":")))
 
     total = crate["crate"]["downloads"]
     recent = crate["crate"].get("recent_downloads")

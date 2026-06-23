@@ -1,0 +1,100 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>slatedb downloads</title>
+<style>
+:root{--ink:#1a1a1a;--mut:#6b6b6b;--line:#d8d8d8;--accent:#2f6f4f;--kafka:#b04a2f;}
+*{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:22px;font-weight:650;margin:0 0 2px;letter-spacing:-.01em}
+.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
+.verdict{border:1px solid #cfe3d6;background:#f1f8f3;border-radius:10px;padding:14px 16px;margin:0 0 26px;font-size:14px}
+.cards{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0 28px}
+.card{flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card .n{font-size:20px;font-weight:650;letter-spacing:-.02em}
+.card .l{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin-top:3px}
+h2{font-size:14px;font-weight:600;margin:32px 0 4px}.note{font-size:12px;color:var(--mut);margin:0 0 14px}
+.box{border:1px solid var(--line);border-radius:10px;padding:16px 14px 10px;overflow-x:auto}
+svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#eee}.axis{stroke:var(--line)}
+.foot{color:var(--mut);font-size:11px;margin-top:28px}
+.empty{color:var(--mut);font-size:13px;padding:24px 8px;text-align:center}
+</style></head><body><div class="wrap">
+<h1>slatedb &mdash; crates.io downloads</h1>
+<div class="sub" id="sub"></div>
+<div class="verdict"><b>Accumulating.</b> Have 1 full 90-day window(s); need ~5 more before an exponential fit is meaningful. Kafka's anchor: R&sup2; 0.996 at +14%/90 days over 2016-2022.</div>
+<div class="cards" id="cards"></div>
+<h2>Monthly download volume</h2>
+<p class="note">Downloads per calendar month from the reconstructed daily series. Hollow bars are partial months (incomplete data at the edges of the 90-day window).</p>
+<div class="box"><svg id="months" width="920" height="280"></svg><div id="months-empty"></div></div>
+<h2>Daily downloads (reconstructed history)</h2>
+<p class="note">All snapshots merged and deduped. Weekly sawtooth = weekday vs weekend (CI traffic).</p>
+<div class="box"><svg id="daily" width="920" height="240"></svg><div id="daily-empty"></div></div>
+<h2>90-day window exponential test</h2>
+<p class="note">Consecutive 90-day windows on a log axis. A pure exponential is a straight line. The <span style="color:var(--kafka);font-weight:600">red dashed</span> line is the Kafka anchor slope (+14%/window).</p>
+<div class="box"><svg id="windows" width="920" height="260"></svg><div id="windows-empty"></div></div>
+<div class="foot" id="foot"></div>
+</div>
+<script>
+const P={"generated": "2026-06-23 18:36 UTC", "daily": [["2026-03-26", 2355], ["2026-03-27", 2528], ["2026-03-28", 321], ["2026-03-29", 278], ["2026-03-30", 2462], ["2026-03-31", 2295], ["2026-04-01", 2735], ["2026-04-02", 2030], ["2026-04-03", 1474], ["2026-04-04", 497], ["2026-04-05", 347], ["2026-04-06", 1871], ["2026-04-07", 2185], ["2026-04-08", 2952], ["2026-04-09", 2794], ["2026-04-10", 2722], ["2026-04-11", 434], ["2026-04-12", 792], ["2026-04-13", 3512], ["2026-04-14", 3006], ["2026-04-15", 3165], ["2026-04-16", 3116], ["2026-04-17", 4106], ["2026-04-18", 1257], ["2026-04-19", 933], ["2026-04-20", 3933], ["2026-04-21", 3530], ["2026-04-22", 2933], ["2026-04-23", 2528], ["2026-04-24", 2906], ["2026-04-25", 633], ["2026-04-26", 540], ["2026-04-27", 4006], ["2026-04-28", 4575], ["2026-04-29", 2988], ["2026-04-30", 3633], ["2026-05-01", 2705], ["2026-05-02", 793], ["2026-05-03", 966], ["2026-05-04", 2961], ["2026-05-05", 2516], ["2026-05-06", 3818], ["2026-05-07", 3511], ["2026-05-08", 3135], ["2026-05-09", 1329], ["2026-05-10", 704], ["2026-05-11", 2357], ["2026-05-12", 3350], ["2026-05-13", 2703], ["2026-05-14", 4114], ["2026-05-15", 3900], ["2026-05-16", 972], ["2026-05-17", 636], ["2026-05-18", 3108], ["2026-05-19", 2455], ["2026-05-20", 2364], ["2026-05-21", 3109], ["2026-05-22", 2608], ["2026-05-23", 607], ["2026-05-24", 726], ["2026-05-25", 929], ["2026-05-26", 2639], ["2026-05-27", 3633], ["2026-05-28", 3427], ["2026-05-29", 3836], ["2026-05-30", 2118], ["2026-05-31", 429], ["2026-06-01", 4881], ["2026-06-02", 4844], ["2026-06-03", 3499], ["2026-06-04", 4050], ["2026-06-05", 3429], ["2026-06-06", 901], ["2026-06-07", 440], ["2026-06-08", 2290], ["2026-06-09", 2180], ["2026-06-10", 2785], ["2026-06-11", 2953], ["2026-06-12", 2668], ["2026-06-13", 659], ["2026-06-14", 960], ["2026-06-15", 3453], ["2026-06-16", 3082], ["2026-06-17", 3167], ["2026-06-18", 3280], ["2026-06-19", 1111], ["2026-06-20", 835], ["2026-06-21", 397], ["2026-06-22", 3109], ["2026-06-23", 2711]], "months": [{"month": "2026-03", "total": 10239, "ndays": 6, "partial": true}, {"month": "2026-04", "total": 72133, "ndays": 30, "partial": false}, {"month": "2026-05", "total": 72458, "ndays": 31, "partial": false}, {"month": "2026-06", "total": 57684, "ndays": 23, "partial": true}], "windows": [{"start": "2026-03-26", "end": "2026-06-23", "total": 212514}], "fit": null, "cumulative": [{"date": "2026-06-23", "total": 453849}], "kafka": {"r2": 0.996, "growth90": 0.139, "label": "Kafka new clients 2016-22"}, "latest_total": 453849};
+const NS="http://www.w3.org/2000/svg";
+const el=(n,a)=>{const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);return e;};
+const fmt=n=>Math.round(n).toLocaleString();
+document.getElementById('sub').textContent=`generated ${P.generated} · ${P.daily.length} daily points · ${P.months.length} months`;
+const cards=document.getElementById('cards');
+const fullMonths=P.months.filter(m=>!m.partial);
+const addCard=(n,l)=>{const c=document.createElement('div');c.className='card';c.innerHTML=`<div class="n">${n}</div><div class="l">${l}</div>`;cards.appendChild(c);};
+addCard(P.latest_total.toLocaleString(),'all-time downloads');
+addCard(P.daily.length,'days reconstructed');
+addCard(fullMonths.length,'full months');
+addCard(P.fit?`R² ${P.fit.r2.toFixed(3)}`:'—','exp fit (90d)');
+
+// monthly bars
+(function(){const svg=document.getElementById('months'),W=920,H=280,m={t:12,r:14,b:54,l:54};
+const M=P.months;if(!M.length){document.getElementById('months-empty').className='empty';document.getElementById('months-empty').textContent='No data yet.';svg.remove();return;}
+const iw=W-m.l-m.r,ih=H-m.t-m.b,max=Math.max(...M.map(x=>x.total)),maxR=Math.max(1,Math.ceil(max/10000)*10000);
+const bw=iw/M.length,bar=bw*0.66;
+for(let g=0;g<=maxR;g+=Math.max(10000,Math.round(maxR/5/10000)*10000)){const yy=m.t+ih-ih*g/maxR;
+svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
+svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=(g/1000)+'k';}
+M.forEach((d,i)=>{const h=ih*d.total/maxR,x=m.l+i*bw+(bw-bar)/2,yy=m.t+ih-h;
+svg.appendChild(el('rect',{x,y:yy,width:bar,height:h,rx:2,fill:d.partial?'#fff':'#3a3a3a',stroke:'#3a3a3a','stroke-width':d.partial?1:0,'stroke-dasharray':d.partial?'3 2':''}));
+svg.appendChild(el('text',{class:'tk',x:x+bar/2,y:H-40,'text-anchor':'end',transform:`rotate(-50 ${x+bar/2} ${H-40})`})).textContent=d.month;});
+svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
+
+// daily line
+(function(){const svg=document.getElementById('daily'),W=920,H=240,m={t:12,r:14,b:28,l:48};
+const D=P.daily;if(D.length<2){document.getElementById('daily-empty').className='empty';document.getElementById('daily-empty').textContent='Need more days.';svg.remove();return;}
+const iw=W-m.l-m.r,ih=H-m.t-m.b,max=Math.max(...D.map(x=>x[1])),maxR=Math.max(1,Math.ceil(max/1000)*1000);
+const x=i=>m.l+iw*i/(D.length-1),y=v=>m.t+ih-ih*v/maxR;
+for(let g=0;g<=maxR;g+=Math.max(1000,Math.round(maxR/5/1000)*1000)){const yy=y(g);
+svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
+svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=(g/1000)+'k';}
+let pa=`M ${x(0)} ${y(D[0][1])}`,ar=`M ${x(0)} ${m.t+ih} L ${x(0)} ${y(D[0][1])}`;
+D.forEach((d,i)=>{if(i){pa+=` L ${x(i)} ${y(d[1])}`;ar+=` L ${x(i)} ${y(d[1])}`;}});
+ar+=` L ${x(D.length-1)} ${m.t+ih} Z`;
+svg.appendChild(el('path',{d:ar,fill:'#2f6f4f',opacity:.10}));
+svg.appendChild(el('path',{d:pa,fill:'none',stroke:'#2f6f4f','stroke-width':1.5}));
+svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
+[0,Math.floor(D.length/2),D.length-1].forEach(i=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':'middle'})).textContent=D[i][0]);})();
+
+// 90d windows log scale
+(function(){const svg=document.getElementById('windows'),W=920,H=260,m={t:12,r:14,b:42,l:54};
+const Wd=P.windows;if(Wd.length<2){document.getElementById('windows-empty').className='empty';
+document.getElementById('windows-empty').textContent=`${Wd.length} window(s) so far — the exponential test needs ~6. Kafka anchor: R² ${P.kafka.r2}, ${(P.kafka.growth90*100).toFixed(0)}%/window.`;svg.remove();return;}
+const iw=W-m.l-m.r,ih=H-m.t-m.b;const vals=Wd.map(w=>w.total);
+const lo=Math.log10(Math.max(1,Math.min(...vals)*0.8)),hi=Math.log10(Math.max(...vals)*1.25);
+const x=i=>m.l+iw*i/(Wd.length-1),y=v=>m.t+ih-ih*(Math.log10(v)-lo)/(hi-lo);
+const ticks=[];for(let e=Math.floor(lo);e<=Math.ceil(hi);e++){[1,2,5].forEach(mul=>{const v=mul*10**e;if(Math.log10(v)>=lo&&Math.log10(v)<=hi)ticks.push(v);});}
+ticks.forEach(v=>{const yy=y(v);svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
+svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=v>=1e6?(v/1e6+'M'):v>=1e3?(v/1e3+'k'):v;});
+// kafka anchor slope anchored at first window
+const g=Math.log10(1+P.kafka.growth90);let kp=`M ${x(0)} ${y(vals[0])}`;
+for(let i=1;i<Wd.length;i++)kp+=` L ${x(i)} ${y(vals[0]*Math.pow(10,g*i))}`;
+svg.appendChild(el('path',{d:kp,fill:'none',stroke:'#b04a2f','stroke-width':1.3,'stroke-dasharray':'5 4'}));
+let lp=`M ${x(0)} ${y(vals[0])}`;Wd.forEach((w,i)=>{if(i)lp+=` L ${x(i)} ${y(w.total)}`;});
+svg.appendChild(el('path',{d:lp,fill:'none',stroke:'#2f6f4f','stroke-width':1.4}));
+Wd.forEach((w,i)=>{svg.appendChild(el('circle',{cx:x(i),cy:y(w.total),r:3.2,fill:'#2f6f4f'}));
+svg.appendChild(el('text',{class:'tk',x:x(i),y:H-26,'text-anchor':'middle'})).textContent=w.start.slice(2,7);});
+svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
+
+document.getElementById('foot').textContent='Source: crates.io API. Daily data older than ~90 days exists only because it was snapshotted here. Anchor: Kafka (new) client downloads, 2016-2022.';
+</script></body></html>

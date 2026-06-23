@@ -1,0 +1,43 @@
+name: capture + render slatedb downloads
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'      # 06:00 UTC on the 1st of each month
+  workflow_dispatch: {}        # manual trigger
+
+permissions:
+  contents: write
+
+concurrency:
+  group: slatedb-stats-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Capture from crates.io
+        env:
+          CRATES_UA: 'slatedb-stats (https://github.com/responsivedev/slatedb-stats)'
+        run: python3 scripts/capture.py
+
+      - name: Render trend + dashboard
+        run: python3 scripts/render.py
+
+      - name: Commit data + dashboard
+        run: |
+          git config user.name  'slatedb-stats-bot'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data docs README.md
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "data: slatedb downloads $(date -u +%Y-%m-%d)"
+            git push
+          fi

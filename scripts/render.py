@@ -21,6 +21,26 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 SNAPS = DATA / "snapshots"
 DOCS = ROOT / "docs"
+PINNED_TRAFFIC_VERSION = "0.10.1"
+
+
+def reconcile_counts(counts, target):
+    """Scale per-version counts to an authoritative daily total."""
+    total_counts = sum(counts.values())
+    if target is None or total_counts == target or total_counts == 0:
+        return dict(counts)
+    scaled = []
+    for num, count in counts.items():
+        raw = count * target / total_counts
+        whole = math.floor(raw)
+        scaled.append([raw - whole, num, whole])
+    remainder = target - sum(x[2] for x in scaled)
+    for _, num, _ in sorted(scaled, reverse=True)[:remainder]:
+        for item in scaled:
+            if item[1] == num:
+                item[2] += 1
+                break
+    return {num: count for _, num, count in scaled if count}
 
 
 def load_daily():
@@ -122,8 +142,8 @@ def load_versions():
     return [{"num": n, "downloads": dl} for n, dl in vs]
 
 
-def reconstruct_cumulative():
-    """Upper-bound cumulative-download trajectory from a single crate snapshot.
+def reconstruct_cumulative(exclude_nums=None):
+    """Estimated cumulative-download trajectory from a single crate snapshot.
 
     A version can only be downloaded after it ships, so at any past date t the
     cumulative total was AT MOST:  total - (all-time downloads of every version
@@ -142,6 +162,7 @@ def reconstruct_cumulative():
     amount that must belong to versions released before t. Overlapping snapshots
     are merged date-by-date with the newest snapshot authoritative for each date.
     """
+    exclude_nums = set(exclude_nums or [])
     crate_dir = SNAPS / "crate"
     files = sorted(crate_dir.glob("*.json")) if crate_dir.exists() else []
     if not files:
@@ -160,26 +181,11 @@ def reconstruct_cumulative():
     ]
     if not vs:
         return [], {}
-    total = d["crate"]["downloads"]
+    excluded = [v for v in vs if v["num"] in exclude_nums]
+    excluded_lifetime = sum(v["downloads"] for v in excluded)
+    total = d["crate"]["downloads"] - excluded_lifetime
     by_id = {v["id"]: v for v in vs if v["id"] is not None}
     daily_evidence = {}
-    def reconcile_counts(counts, target):
-        """Scale per-version counts to an authoritative daily total."""
-        total_counts = sum(counts.values())
-        if target is None or total_counts == target or total_counts == 0:
-            return dict(counts)
-        scaled = []
-        for num, count in counts.items():
-            raw = count * target / total_counts
-            whole = math.floor(raw)
-            scaled.append([raw - whole, num, whole])
-        remainder = target - sum(x[2] for x in scaled)
-        for _, num, _ in sorted(scaled, reverse=True)[:remainder]:
-            for item in scaled:
-                if item[1] == num:
-                    item[2] += 1
-                    break
-        return {num: count for _, num, count in scaled if count}
 
     for dl_path in sorted((SNAPS / "downloads").glob("*.json")):
         dd = json.loads(dl_path.read_text())
@@ -222,19 +228,23 @@ def reconstruct_cumulative():
                 "total": sum(explicit.values()),
             }
 
+    vs = [v for v in vs if v["num"] not in exclude_nums]
+    included_nums = {v["num"] for v in vs}
+
     explicit_rows = [
         {"date": date, "num": num, "downloads": downloads}
         for date, day in daily_evidence.items()
         for num, downloads in day["explicit"].items()
+        if num in included_nums
     ]
     extra_rows = [
         {
             "date": date,
-            "downloads": day["extra"],
+            "downloads": 0 if exclude_nums else day["extra"],
             "explicit_nums": set(day["explicit"]),
         }
         for date, day in daily_evidence.items()
-        if day["extra"]
+        if day["extra"] and not exclude_nums
     ]
 
     explicit_nums = {r["num"] for r in explicit_rows}
@@ -254,6 +264,9 @@ def reconstruct_cumulative():
         "explicit_version_count": len(explicit_nums),
         "explicit_daily_total": sum(r["downloads"] for r in explicit_rows),
         "extra_daily_total": sum(r["downloads"] for r in extra_rows),
+        "excluded_versions": sorted(exclude_nums),
+        "excluded_lifetime_total": excluded_lifetime,
+        "latest_total": total,
     }
 
     def cap_at(t):
@@ -368,6 +381,58 @@ def measured_cumulative(daily, total):
     return out
 
 
+def daily_excluding_version(exclude_num, daily):
+    """Exact recent daily series with one version removed.
+
+    This only uses archived per-version daily snapshots. Aggregate-only
+    crates.io days are skipped because their version mix is unknowable.
+    """
+    by_date = {}
+    excluded_by_date = {}
+    for vdl_path in sorted((SNAPS / "version_downloads").glob("*.json")):
+        vd = json.loads(vdl_path.read_text())
+        snap_dates = defaultdict(lambda: defaultdict(int))
+        for num, raw in vd.get("versions", {}).items():
+            for r in raw.get("version_downloads", []):
+                snap_dates[r["date"]][num] += r["downloads"]
+        for date, counts in snap_dates.items():
+            counts = reconcile_counts(counts, daily.get(date))
+            excluded_by_date[date] = counts.get(exclude_num, 0)
+            by_date[date] = sum(v for num, v in counts.items() if num != exclude_num)
+    series = dict(sorted(by_date.items()))
+    meta = {
+        "excluded_version": exclude_num,
+        "daily_start": min(series) if series else None,
+        "daily_end": max(series) if series else None,
+        "daily_days": len(series),
+        "excluded_daily_total": sum(excluded_by_date.values()),
+    }
+    return series, meta
+
+
+def excluded_view(daily, latest_total):
+    versions = load_versions()
+    excluded = next((v for v in versions if v["num"] == PINNED_TRAFFIC_VERSION), None)
+    if not excluded:
+        return None
+    filtered_daily, meta = daily_excluding_version(PINNED_TRAFFIC_VERSION, daily)
+    filtered_total = latest_total - excluded["downloads"]
+    reconstruction, reconstruction_meta = reconstruct_cumulative({PINNED_TRAFFIC_VERSION})
+    meta.update({
+        "excluded_lifetime": excluded["downloads"],
+        "unobserved_excluded_lifetime": excluded["downloads"] - meta["excluded_daily_total"],
+    })
+    return {
+        "num": PINNED_TRAFFIC_VERSION,
+        "latest_total": filtered_total,
+        "daily": [[d, v] for d, v in filtered_daily.items()],
+        "measured": measured_cumulative(filtered_daily, filtered_total),
+        "reconstruction": reconstruction,
+        "reconstruction_meta": reconstruction_meta,
+        "meta": meta,
+    }
+
+
 def main():
     DOCS.mkdir(exist_ok=True)
     daily = load_daily()
@@ -399,6 +464,7 @@ def main():
         "reconstruction": reconstruction,
         "reconstruction_meta": reconstruction_meta,
         "measured": measured_cumulative(daily, latest_total),
+        "excluded_view": excluded_view(daily, latest_total),
         "dominant_release": dominant_release(),
         "cumulative": cumulative,
         "latest_total": latest_total,
@@ -486,6 +552,11 @@ that archived daily snapshots prove happened later. Per-version daily snapshots
 attribute old-version traffic directly; the crate-level daily endpoint remains
 the authoritative source for total daily volume.
 
+The dashboard also has a traffic filter for v0.10.1, which appears to be
+dominated by pinned old-version traffic. In that filtered view, cumulative
+estimates remove the full v0.10.1 lifetime total. Daily and download-rate charts
+remove v0.10.1 only on days with exact per-version attribution.
+
 `scripts/capture.py` / `scripts/render.py` are the two job steps.
 Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
 """
@@ -506,6 +577,11 @@ h1{font-size:22px;font-weight:650;margin:0 0 2px;letter-spacing:-.01em}
 h2{font-size:14px;font-weight:600;margin:34px 0 4px}.note{font-size:12px;color:var(--mut);margin:0 0 14px}
 .box{border:1px solid var(--line);border-radius:10px;padding:16px 14px 10px;overflow-x:auto}
 svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#eee}.axis{stroke:var(--line)}
+.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:24px 0 12px}
+.control-label{font-size:12px;color:var(--mut);font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+.seg button{appearance:none;border:0;border-right:1px solid var(--line);background:#fff;color:var(--ink);font:12px/1.2 inherit;padding:7px 10px;cursor:pointer}
+.seg button:last-child{border-right:0}.seg button.active{background:#1f1f1f;color:#fff}.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .foot{color:var(--mut);font-size:11px;margin-top:32px}.foot a{color:var(--mut)}
 .empty{color:var(--mut);font-size:13px;padding:24px 8px;text-align:center}
 .tip{position:fixed;pointer-events:none;background:#1a1a1a;color:#fff;font-size:12px;line-height:1.45;padding:6px 9px;border-radius:6px;white-space:pre;opacity:0;transition:opacity .08s;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.25)}
@@ -524,6 +600,14 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 
 <h2>Daily downloads (last 90 days)</h2>
 <p class="note">Weekly sawtooth = weekday vs weekend (CI traffic).</p>
+<div class="controls" id="traffic-controls" hidden>
+  <span class="control-label">Traffic</span>
+  <span class="seg" role="group" aria-label="Download traffic filter">
+    <button type="button" data-view="all" class="active">All downloads</button>
+    <button type="button" data-view="filtered">Exclude v0.10.1</button>
+  </span>
+</div>
+<p class="note" id="traffic-note" style="max-width:760px"></p>
 <div class="box"><svg id="daily" width="920" height="240" viewBox="0 0 920 240"></svg><div id="daily-empty"></div></div>
 
 <h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Download rate</h3>
@@ -570,20 +654,60 @@ const pct=v=>`${Math.round(v*100)}%`;
 node.innerHTML=`<strong>The ${c.num} caveat.</strong> v${c.num} is the dominant active release line &mdash; ${pct(c.lifetime_share)} of all lifetime downloads, and ${pct(c.window_share)} of all measured downloads in the recent window (${fmt(c.window_downloads)} of its ${fmt(c.lifetime)} lifetime downloads landed between ${c.window_start} and ${c.window_end}). That likely reflects pinned dependencies or a long-lived ${c.line} line, not necessarily new adoption accelerating.`;
 })();
 
+let trafficView='all';
+const hasFiltered=!!P.excluded_view;
+const selected=()=>trafficView==='filtered'&&hasFiltered?P.excluded_view:{
+latest_total:P.latest_total,
+daily:P.daily,
+reconstruction:P.reconstruction,
+reconstruction_meta:P.reconstruction_meta,
+measured:P.measured,
+meta:null
+};
+const clearSvg=svg=>{while(svg.firstChild)svg.removeChild(svg.firstChild);};
+const empty=(id,text)=>{const n=document.getElementById(id);n.className='empty';n.textContent=text;};
+const resetEmpty=id=>{const n=document.getElementById(id);n.className='';n.textContent='';};
+function updateTrafficCopy(){
+const note=document.getElementById('traffic-note');
+const rn=document.getElementById('reconmeta');
+if(trafficView==='filtered'&&hasFiltered){
+const e=P.excluded_view,m=e.meta||{};
+note.textContent=`Filtered view removes v${e.num}. Daily and rate charts use exact per-version data from ${m.daily_start} to ${m.daily_end}; the aggregate-only day before that is omitted because it cannot be split by version.`;
+rn.textContent=`Filtered cumulative total removes all ${fmt(m.excluded_lifetime)} lifetime v${e.num} downloads. ${fmt(m.excluded_daily_total)} of those downloads are observed in exact per-version daily data; the remaining ${fmt(m.unobserved_excluded_lifetime)} older downloads are removed from the cumulative total but cannot be placed on exact days.`;
+}else{
+note.textContent=hasFiltered?'Use the filter to remove the dominant old pinned-version traffic from the daily, rate, and estimated-growth charts.':'';
+if(P.reconstruction_meta&&P.reconstruction_meta.daily_start){
+const m=P.reconstruction_meta;
+rn.textContent=`Archived daily data currently covers ${m.daily_start} to ${m.daily_end} across ${m.daily_days.toLocaleString()} days; ${m.exact_version_days.toLocaleString()} of those days have exact per-version attribution. The estimate attributes ${m.explicit_daily_total.toLocaleString()} downloads across ${m.explicit_version_count} versions and leaves ${m.extra_daily_total.toLocaleString()} downloads in aggregate extra_downloads where per-version detail is unavailable.`;
+}
+}
+}
+if(hasFiltered){
+const controls=document.getElementById('traffic-controls');
+controls.hidden=false;
+controls.querySelectorAll('button').forEach(btn=>btn.addEventListener('click',()=>{
+trafficView=btn.dataset.view;
+controls.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b===btn));
+updateTrafficCopy();renderRecon();renderDaily();renderRate();
+}));
+}
+updateTrafficCopy();
+
 // cumulative estimate from version release dates and archived daily data
-(function(){const svg=document.getElementById('recon'),W=920,H=300,m={t:14,r:16,b:44,l:62};
-const R=P.reconstruction||[];
-if(R.length<2){document.getElementById('recon-empty').className='empty';document.getElementById('recon-empty').textContent='No version-date data yet.';svg.remove();return;}
+function renderRecon(){const svg=document.getElementById('recon'),W=920,H=300,m={t:14,r:16,b:44,l:62};
+clearSvg(svg);resetEmpty('recon-empty');
+const S=selected(),R=S.reconstruction||[];
+if(R.length<2){empty('recon-empty','No version-date data yet.');return;}
 const iw=W-m.l-m.r,ih=H-m.t-m.b;
 const day=s=>{const a=s.split('-').map(Number);return Date.UTC(a[0],a[1]-1,a[2])/864e5;};
 const t0=day(R[0].date),t1=day(R[R.length-1].date),span=Math.max(1,t1-t0);
-const max=Math.max(P.latest_total,...R.map(r=>r.cap_tight??r.cap)),step=Math.max(50000,Math.round(max/5/50000)*50000),maxR=Math.ceil(max/step)*step;
+const max=Math.max(S.latest_total,...R.map(r=>r.cap_tight??r.cap)),step=Math.max(50000,Math.round(max/5/50000)*50000),maxR=Math.ceil(max/step)*step;
 const xd=dn=>m.l+iw*(dn-t0)/span,x=s=>xd(day(s)),y=v=>m.t+ih-ih*v/maxR;
 for(let g=0;g<=maxR;g+=step){const yy=y(g);
 svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
 svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=(g/1000)+'k';}
 // the estimate is only drawn for dates BEFORE measured daily data begins; past that, the red line is exact
-const Mu=P.measured||[];
+const Mu=S.measured||[];
 const cut=Mu.length?day(Mu[0].date):Infinity;
 const val=(r,field)=>r[field]??r.cap;
 const clip=field=>{const out=[];for(let i=0;i<R.length;i++){const di=day(R[i].date),vi=val(R[i],field);
@@ -612,9 +736,9 @@ const hit=el('circle',{cx,cy,r:9,fill:'transparent'});
 const lbl=r.versions.length?`v${r.versions.join(', v')} — released ${r.date}`:`today (${r.date})`;
 const tip=r.versions.length?`${lbl}\n+${fmt(r.added)} lifetime downloads\ncumulative ≤ ${fmt(bound)} before this release`:`${lbl}\ncumulative = ${fmt(bound)} (exact)`;
 bindTip(hit,tip);svg.appendChild(hit);});
-(P.cumulative||[]).forEach(c=>{const dd=day(c.date);if(dd>=t0&&dd<=t1){const dot=el('circle',{cx:x(c.date),cy:y(c.total),r:4,fill:'#b04a2f'});bindTip(dot,`live capture ${c.date}\ncumulative = ${fmt(c.total)} (exact)`);svg.appendChild(dot);}});
+if(trafficView==='all')(P.cumulative||[]).forEach(c=>{const dd=day(c.date);if(dd>=t0&&dd<=t1){const dot=el('circle',{cx:x(c.date),cy:y(c.total),r:4,fill:'#b04a2f'});bindTip(dot,`live capture ${c.date}\ncumulative = ${fmt(c.total)} (exact)`);svg.appendChild(dot);}});
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
-[[R[0].date,'start'],[R[Math.floor(R.length/2)].date,'middle'],[R[R.length-1].date,'end']].forEach(([dt,anc])=>svg.appendChild(el('text',{class:'tk',x:x(dt),y:H-12,'text-anchor':anc})).textContent=dt);})();
+[[R[0].date,'start'],[R[Math.floor(R.length/2)].date,'middle'],[R[R.length-1].date,'end']].forEach(([dt,anc])=>svg.appendChild(el('text',{class:'tk',x:x(dt),y:H-12,'text-anchor':anc})).textContent=dt);}
 
 // monthly bars
 (function(){const svg=document.getElementById('months'),W=920,H=280,m={t:12,r:14,b:54,l:54};
@@ -646,8 +770,9 @@ svg.appendChild(el('text',{class:'tk',x:m.l+bw+6,y:y+bar*0.78})).textContent=`${
 })();
 
 // daily line
-(function(){const svg=document.getElementById('daily'),W=920,H=240,m={t:12,r:14,b:28,l:48};
-const D=P.daily;if(D.length<2){document.getElementById('daily-empty').className='empty';document.getElementById('daily-empty').textContent='Need more days.';svg.remove();return;}
+function renderDaily(){const svg=document.getElementById('daily'),W=920,H=240,m={t:12,r:14,b:28,l:48};
+clearSvg(svg);resetEmpty('daily-empty');
+const D=selected().daily||[];if(D.length<2){empty('daily-empty','Need more days.');return;}
 const iw=W-m.l-m.r,ih=H-m.t-m.b,max=Math.max(...D.map(x=>x[1])),maxR=Math.max(1,Math.ceil(max/1000)*1000);
 const x=i=>m.l+iw*i/(D.length-1),y=v=>m.t+ih-ih*v/maxR;
 for(let g=0;g<=maxR;g+=Math.max(1000,Math.round(maxR/5/1000)*1000)){const yy=y(g);
@@ -659,11 +784,12 @@ ar+=` L ${x(D.length-1)} ${m.t+ih} Z`;
 svg.appendChild(el('path',{d:ar,fill:'#2f6f4f',opacity:.10}));
 svg.appendChild(el('path',{d:pa,fill:'none',stroke:'#2f6f4f','stroke-width':1.5}));
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
-const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);})();
+const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);}
 
 // measured download-rate rolling averages
-(function(){const svg=document.getElementById('rate'),W=920,H=240,m={t:12,r:58,b:28,l:48};
-const D=P.daily;if(D.length<7){document.getElementById('rate-empty').className='empty';document.getElementById('rate-empty').textContent='Need at least 7 days.';svg.remove();return;}
+function renderRate(){const svg=document.getElementById('rate'),W=920,H=240,m={t:12,r:58,b:28,l:48};
+clearSvg(svg);resetEmpty('rate-empty');
+const D=selected().daily||[];if(D.length<7){empty('rate-empty','Need at least 7 days.');return;}
 const roll=w=>{const out=[];let sum=0;D.forEach((d,i)=>{sum+=d[1];if(i>=w)sum-=D[i-w][1];if(i>=w-1)out.push({i,date:d[0],v:sum/w,w});});return out;};
 const R7=roll(7),R28=D.length>=28?roll(28):[];
 const vals=R7.concat(R28).map(p=>p.v),max=Math.max(...vals),step=Math.max(500,Math.round(max/5/500)*500),maxR=Math.ceil(max/step)*step;
@@ -678,7 +804,7 @@ svg.appendChild(el('path',{d:path,fill:'none',stroke:color,'stroke-width':dash?1
 const last=pts[pts.length-1];svg.appendChild(el('text',{class:'tk',x:x(last.i)+6,y:y(last.v)+3,fill:color})).textContent=`${last.w}d`;};
 draw(R7,'#2f6f4f',false);draw(R28,'#3b6fb0',true);
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
-const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);})();
+const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);}
 
 // 90-day window growth fit — only shown once enough windows have accumulated
 (function(){const enough=P.enough_windows||6,Wd=P.windows;
@@ -701,6 +827,7 @@ svg.appendChild(el('text',{class:'tk',x:x(i),y:H-26,'text-anchor':'middle'})).te
 if(P.fit)svg.appendChild(el('text',{class:'tk',x:W-m.r,y:m.t+10,'text-anchor':'end','font-weight':600})).textContent=`R² ${P.fit.r2.toFixed(3)}`;
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));})();
 
+renderRecon();renderDaily();renderRate();
 document.getElementById('foot').innerHTML='Source: <a href="https://crates.io/crates/slatedb">crates.io</a>';
 </script></body></html>"""
 

@@ -40,13 +40,18 @@ that archived daily snapshots prove happened later. Per-version daily snapshots
 attribute old-version traffic directly; the crate-level daily endpoint remains
 the authoritative source for total daily volume.
 
+The dashboard also has a traffic filter for v0.10.1, which appears to be
+dominated by pinned old-version traffic. In that filtered view, cumulative
+estimates remove the full v0.10.1 lifetime total. Daily and download-rate charts
+remove v0.10.1 only on days with exact per-version attribution.
+
 `scripts/capture.py` / `scripts/render.py` are the two job steps.
 Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
 
 ## Current numbers
 
 <!--STATS-->
-_Updated 2026-06-24 01:20 UTC_
+_Updated 2026-06-24 05:05 UTC_
 
 - All-time downloads: **453,849**
 - Daily history reconstructed: **90 days**

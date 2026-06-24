@@ -6,12 +6,14 @@ per-crate / per-version totals persist forever. So we capture both:
 
   * the cumulative total (robust, never rolls off) -> month-over-month diffs
     give monthly download volume, the figure comparable to other ecosystems.
-  * the raw daily endpoint (last 90 days) -> archived per run; deduped across
-    snapshots by render.py these reconstruct a permanent daily history.
+  * the raw crate daily endpoint (last 90 days) -> archived per run; deduped
+    across snapshots by render.py these reconstruct a permanent daily history.
+  * per-version daily endpoints -> archived per run; these attribute the
+    crate endpoint's extra_downloads bucket back to specific old versions.
 
 Pure stdlib so the CI job needs no pip installs.
 """
-import json, os, csv, urllib.request, datetime
+import json, os, csv, urllib.request, urllib.parse, datetime
 from pathlib import Path
 
 CRATE = "slatedb"
@@ -21,6 +23,7 @@ DATA = ROOT / "data"
 SNAPS = DATA / "snapshots"
 DL_SNAPS = SNAPS / "downloads"   # raw /downloads responses (daily, last 90d)
 CRATE_SNAPS = SNAPS / "crate"    # raw crate-metadata responses (cumulative totals)
+VDL_SNAPS = SNAPS / "version_downloads"  # per-version /downloads responses
 
 
 def get(url):
@@ -48,15 +51,27 @@ def append_row(path, header, row):
 def main():
     DL_SNAPS.mkdir(parents=True, exist_ok=True)
     CRATE_SNAPS.mkdir(parents=True, exist_ok=True)
+    VDL_SNAPS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
     crate = get(f"https://crates.io/api/v1/crates/{CRATE}")
     downloads = get(f"https://crates.io/api/v1/crates/{CRATE}/downloads")
+    version_downloads = {}
+    for v in crate["versions"]:
+        version = urllib.parse.quote(v["num"], safe="")
+        version_downloads[v["num"]] = get(
+            f"https://crates.io/api/v1/crates/{CRATE}/{version}/downloads"
+        )
 
-    # archive BOTH raw responses verbatim so everything is reconstructable from
-    # data/snapshots alone (overwrites on a same-day re-run).
+    # archive raw responses so everything is reconstructable from data/snapshots
+    # alone (overwrites on a same-day re-run).
     (DL_SNAPS / f"{stamp}.json").write_text(json.dumps(downloads, separators=(",", ":")))
     (CRATE_SNAPS / f"{stamp}.json").write_text(json.dumps(crate, separators=(",", ":")))
+    (VDL_SNAPS / f"{stamp}.json").write_text(json.dumps({
+        "crate": CRATE,
+        "date": stamp,
+        "versions": version_downloads,
+    }, separators=(",", ":")))
 
     total = crate["crate"]["downloads"]
     recent = crate["crate"].get("recent_downloads")
@@ -76,7 +91,7 @@ def main():
                    [stamp, v["num"], v["downloads"]])
 
     print(f"captured {stamp}: cumulative_total={total:,} recent_90d={recent:,} "
-          f"versions={len(crate['versions'])}")
+          f"versions={len(crate['versions'])} version_downloads={len(version_downloads)}")
 
 
 if __name__ == "__main__":

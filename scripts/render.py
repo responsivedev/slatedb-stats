@@ -137,10 +137,10 @@ def reconstruct_cumulative():
     snapshots over time.
     Archived /downloads snapshots tighten that ceiling. If a download is known
     to have happened after t, it also cannot be part of cumulative(t).
-    Per-version rows can be attributed exactly; crates.io's aggregate
-    extra_downloads bucket cannot, so we subtract only the minimum amount that
-    must belong to versions released before t. Overlapping snapshots are merged
-    date-by-date with the newest snapshot authoritative for each date.
+    Per-version download snapshots can be attributed exactly; crates.io's
+    aggregate extra_downloads bucket cannot, so we subtract only the minimum
+    amount that must belong to versions released before t. Overlapping snapshots
+    are merged date-by-date with the newest snapshot authoritative for each date.
     """
     crate_dir = SNAPS / "crate"
     files = sorted(crate_dir.glob("*.json")) if crate_dir.exists() else []
@@ -161,13 +161,26 @@ def reconstruct_cumulative():
     if not vs:
         return [], {}
     total = d["crate"]["downloads"]
-    # 0.10.1 dominates the lifetime total, so emit a counterfactual curve with it
-    # removed to show how much of the reconstruction depends on that release.
-    EXCLUDE = {"0.10.1"}
-    total_ex = total - sum(v["downloads"] for v in vs if v["num"] in EXCLUDE)
-
     by_id = {v["id"]: v for v in vs if v["id"] is not None}
     daily_evidence = {}
+    def reconcile_counts(counts, target):
+        """Scale per-version counts to an authoritative daily total."""
+        total_counts = sum(counts.values())
+        if target is None or total_counts == target or total_counts == 0:
+            return dict(counts)
+        scaled = []
+        for num, count in counts.items():
+            raw = count * target / total_counts
+            whole = math.floor(raw)
+            scaled.append([raw - whole, num, whole])
+        remainder = target - sum(x[2] for x in scaled)
+        for _, num, _ in sorted(scaled, reverse=True)[:remainder]:
+            for item in scaled:
+                if item[1] == num:
+                    item[2] += 1
+                    break
+        return {num: count for _, num, count in scaled if count}
+
     for dl_path in sorted((SNAPS / "downloads").glob("*.json")):
         dd = json.loads(dl_path.read_text())
         by_date = defaultdict(lambda: {"explicit": defaultdict(int), "extra": 0})
@@ -181,8 +194,32 @@ def reconstruct_cumulative():
         for date, day in by_date.items():
             daily_evidence[date] = {
                 "snapshot": dl_path.stem,
+                "source": "crate",
                 "explicit": dict(day["explicit"]),
                 "extra": day["extra"],
+                "total": sum(day["explicit"].values()) + day["extra"],
+            }
+
+    for vdl_path in sorted((SNAPS / "version_downloads").glob("*.json")):
+        vd = json.loads(vdl_path.read_text())
+        by_date = defaultdict(lambda: defaultdict(int))
+        for num, raw in vd.get("versions", {}).items():
+            if num not in {v["num"] for v in vs}:
+                continue
+            for r in raw.get("version_downloads", []):
+                by_date[r["date"]][num] += r["downloads"]
+        # Exact per-version evidence supersedes crate-level extra_downloads for
+        # overlapping dates, while preserving crate-level daily totals when they
+        # are available from the same date.
+        for date, explicit in by_date.items():
+            target = daily_evidence.get(date, {}).get("total")
+            explicit = reconcile_counts(explicit, target)
+            daily_evidence[date] = {
+                "snapshot": vdl_path.stem,
+                "source": "version",
+                "explicit": dict(explicit),
+                "extra": 0,
+                "total": sum(explicit.values()),
             }
 
     explicit_rows = [
@@ -191,7 +228,11 @@ def reconstruct_cumulative():
         for num, downloads in day["explicit"].items()
     ]
     extra_rows = [
-        {"date": date, "downloads": day["extra"]}
+        {
+            "date": date,
+            "downloads": day["extra"],
+            "explicit_nums": set(day["explicit"]),
+        }
         for date, day in daily_evidence.items()
         if day["extra"]
     ]
@@ -202,9 +243,12 @@ def reconstruct_cumulative():
     meta = {
         "crate_snapshot": snap.stem,
         "downloads_snapshots": len(list((SNAPS / "downloads").glob("*.json"))),
+        "version_download_snapshots": len(list((SNAPS / "version_downloads").glob("*.json"))),
         "daily_start": min(daily_dates) if daily_dates else None,
         "daily_end": max(daily_dates) if daily_dates else None,
         "daily_days": len(daily_evidence),
+        "exact_version_days": sum(1 for day in daily_evidence.values()
+                                  if day.get("source") == "version"),
         "daily_total": sum(r["downloads"] for r in explicit_rows) +
                        sum(r["downloads"] for r in extra_rows),
         "explicit_version_count": len(explicit_nums),
@@ -212,37 +256,33 @@ def reconstruct_cumulative():
         "extra_daily_total": sum(r["downloads"] for r in extra_rows),
     }
 
-    def cap_at(t, exclude=frozenset()):
-        total0 = total - sum(v["downloads"] for v in vs if v["num"] in exclude)
-        future = [v for v in vs if v["date"] >= t and v["num"] not in exclude]
+    def cap_at(t):
+        future = [v for v in vs if v["date"] >= t]
         release_only_after = sum(v["downloads"] for v in future)
-        loose = total0 - release_only_after
+        loose = total - release_only_after
 
         explicit_after = 0
         for v in vs:
-            if v["num"] in exclude or v["date"] >= t or v["num"] not in explicit_nums:
+            if v["date"] >= t or v["num"] not in explicit_nums:
                 continue
             known_after = sum(r["downloads"] for r in explicit_rows
                               if r["num"] == v["num"] and r["date"] >= t)
             explicit_after += min(known_after, v["downloads"])
 
-        extra_after = sum(r["downloads"] for r in extra_rows if r["date"] >= t)
-        future_extra_capacity = sum(
-            v["downloads"] for v in future
-            if v["num"] not in explicit_nums
-        )
-        # If a version is excluded from the counterfactual and hidden inside
-        # extra_downloads, that hidden traffic can be from the excluded release.
-        excluded_extra_capacity = sum(
-            v["downloads"] for v in vs
-            if v["num"] in exclude and v["num"] not in explicit_nums
-        )
-        extra_after_for_old_versions = max(
-            0,
-            extra_after - future_extra_capacity - excluded_extra_capacity,
-        )
+        extra_after_for_old_versions = 0
+        for r in extra_rows:
+            if r["date"] < t:
+                continue
+            future_extra_capacity = sum(
+                v["downloads"] for v in future
+                if v["num"] not in r["explicit_nums"]
+            )
+            extra_after_for_old_versions += max(
+                0,
+                r["downloads"] - future_extra_capacity,
+            )
 
-        tight = total0 - release_only_after - explicit_after - extra_after_for_old_versions
+        tight = total - release_only_after - explicit_after - extra_after_for_old_versions
         return loose, min(loose, max(0, tight))
 
     by_date = defaultdict(list)  # release date -> [(version, all-time downloads), ...]
@@ -251,21 +291,17 @@ def reconstruct_cumulative():
     pts = []
     for t in release_dates:
         cap, cap_tight = cap_at(t)
-        cap_ex, cap_ex_tight = cap_at(t, EXCLUDE)
         rel = by_date[t]
         pts.append({
             "date": t,
             "cap": cap,
             "cap_tight": cap_tight,
-            "cap_ex": cap_ex,
-            "cap_ex_tight": cap_ex_tight,
             "versions": [v for v, _ in rel],
             # this release's lifetime downloads = the climb to the next point
             "added": sum(dl for _, dl in rel),
         })
     # snapshot day anchors each curve to its true total
     pts.append({"date": snap.stem, "cap": total, "cap_tight": total,
-                "cap_ex": total_ex, "cap_ex_tight": total_ex,
                 "versions": [], "added": 0})
     return pts, meta
 
@@ -389,8 +425,9 @@ consecutive 90-day windows and see how close R² gets to 1.
 else under `data/` is derived from them and can be regenerated by re-running
 `scripts/render.py`:
 
-- `data/snapshots/downloads/<date>.json` - raw `/downloads` responses (daily counts, last 90d)
+- `data/snapshots/downloads/<date>.json` - raw crate `/downloads` responses (daily counts, last 90d)
 - `data/snapshots/crate/<date>.json` - raw crate-metadata responses (cumulative totals, versions)
+- `data/snapshots/version_downloads/<date>.json` - raw per-version `/downloads` responses
 
 Derived (rebuildable from the snapshots above):
 
@@ -398,6 +435,12 @@ Derived (rebuildable from the snapshots above):
 - `data/slatedb_versions_monthly.csv` - per-version cumulative totals
 - `data/daily_combined.csv` - permanent daily series, deduped across snapshots
 - `docs/index.html` - regenerated dashboard (GitHub Pages)
+
+For the historical cumulative estimate, `scripts/render.py` starts with each
+version's release date and lifetime download total, then subtracts downloads
+that archived daily snapshots prove happened later. Per-version daily snapshots
+attribute old-version traffic directly; the crate-level daily endpoint remains
+the authoritative source for total daily volume.
 
 `scripts/capture.py` / `scripts/render.py` are the two job steps.
 Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
@@ -444,13 +487,12 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 <div class="box"><svg id="rate" width="920" height="240" viewBox="0 0 920 240"></svg><div id="rate-empty"></div></div>
 
 <h2 style="margin-top:48px">Estimated growth</h2>
-<p class="note" style="max-width:760px">The long-run curve below is a constrained reconstruction, not measured history. crates.io keeps daily downloads for only ~90 days; outside that window we have per-version lifetime totals and release dates. The reconstruction uses those facts to draw the tightest upper bound this snapshot supports: it removes versions that did not exist yet, then also removes recent downloads that the 90-day endpoint proves happened after each release-date point. True cumulative downloads can be below this line; they cannot be above it without contradicting the snapshot.</p>
+<p class="note" style="max-width:760px">crates.io keeps daily downloads for only ~90 days. For earlier history, this chart estimates cumulative downloads from the data crates.io does keep: each version's release date, each version's lifetime download count, and every daily download snapshot archived by this repo. Where available, per-version daily snapshots attribute old-version downloads exactly. At each release date, the estimate removes downloads that must have happened later: downloads of versions that did not exist yet, plus archived daily downloads after that date. Because old versions can keep getting pulled by lockfiles, downstream dependencies, and CI, the true historical cumulative total may be lower than the estimate.</p>
 <p class="note" id="reconmeta" style="max-width:760px"></p>
-<p class="note" style="max-width:760px"><strong>The 0.10.1 caveat.</strong> One release &mdash; 0.10.1 (Jan 2026) &mdash; accounts for 42% of all recorded downloads, so it dominates any historical reconstruction. The <span style="color:var(--accent2);font-weight:600">excluding-0.10.1</span> line is a counterfactual baseline: useful for seeing how much of the curve is one release, but not a measured organic-growth series.</p>
-<p class="note" style="max-width:760px"><strong>What would prove acceleration?</strong> Not this reconstruction by itself. A conclusive signal needs exact same-length download deltas from repeated captures &mdash; for example, several 90-day windows whose totals rise consistently after release spikes and weekday effects are accounted for. Until enough exact windows accumulate, the chart can rule out impossible histories above the bound, but it cannot prove sustained acceleration.</p>
+<p class="note" style="max-width:760px"><strong>The 0.10.1 caveat.</strong> 0.10.1 is the dominant active release line. It accounts for 42% of all lifetime downloads and about half of recent measured downloads: 108,086 of its 189,797 lifetime downloads occurred from 2026-03-27 through 2026-06-23, about 51% of all slatedb downloads in that same window. This likely reflects pinned dependencies or a long-lived 0.10.x line, not necessarily new adoption accelerating.</p>
 
-<h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Cumulative downloads over time &mdash; constrained upper bound</h3>
-<p class="note"><span style="color:var(--accent);font-weight:600">Green</span>: tightened upper-bound reconstruction, drawn only before exact daily data begins. <span style="color:var(--accent2);font-weight:600">Blue dashed</span>: tightened counterfactual excluding 0.10.1. <span style="color:var(--fit);font-weight:600">Red</span>: exact cumulative measured from daily data, which takes over for the last ~90 days. Hover any point for the version, release date, and cumulative total.</p>
+<h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Cumulative downloads over time</h3>
+<p class="note"><span style="color:var(--accent);font-weight:600">Green</span>: estimated cumulative downloads before exact daily data begins. <span style="color:var(--fit);font-weight:600">Red</span>: exact cumulative downloads measured from archived daily data. Hover any point for the version, release date, and cumulative total.</p>
 <div class="box"><svg id="recon" width="920" height="300" viewBox="0 0 920 300"></svg><div id="recon-empty"></div></div>
 
 <section id="winsec" hidden>
@@ -476,10 +518,10 @@ document.getElementById('sub').textContent=`Organic adoption on crates.io · upd
 document.getElementById('alltime').textContent=P.latest_total.toLocaleString();
 if(P.reconstruction_meta&&P.reconstruction_meta.daily_start){
 const m=P.reconstruction_meta;
-document.getElementById('reconmeta').textContent=`Archived daily constraint: daily data covers ${m.daily_start} to ${m.daily_end} across ${m.daily_days.toLocaleString()} days. crates.io attributes ${m.explicit_daily_total.toLocaleString()} downloads across ${m.explicit_version_count} explicit versions and buckets ${m.extra_daily_total.toLocaleString()} more as aggregate extra_downloads, so old-version attribution remains partly unknown.`;
+document.getElementById('reconmeta').textContent=`Archived daily data currently covers ${m.daily_start} to ${m.daily_end} across ${m.daily_days.toLocaleString()} days; ${m.exact_version_days.toLocaleString()} of those days have exact per-version attribution. The estimate attributes ${m.explicit_daily_total.toLocaleString()} downloads across ${m.explicit_version_count} versions and leaves ${m.extra_daily_total.toLocaleString()} downloads in aggregate extra_downloads where per-version detail is unavailable.`;
 }
 
-// cumulative upper-bound reconstruction (from per-version release dates)
+// cumulative estimate from version release dates and archived daily data
 (function(){const svg=document.getElementById('recon'),W=920,H=300,m={t:14,r:16,b:44,l:62};
 const R=P.reconstruction||[];
 if(R.length<2){document.getElementById('recon-empty').className='empty';document.getElementById('recon-empty').textContent='No version-date data yet.';svg.remove();return;}
@@ -500,16 +542,9 @@ if(di<cut)out.push([di,vi]);
 else{const p=out[out.length-1];if(p&&p[0]<cut){const f=(cut-p[0])/(di-p[0]);out.push([cut,p[1]+(vi-p[1])*f]);}break;}}
 return out;};
 const capPts=clip('cap_tight');
-let lp=`M ${xd(capPts[0][0])} ${y(capPts[0][1])}`,ar=`M ${xd(capPts[0][0])} ${m.t+ih} L ${xd(capPts[0][0])} ${y(capPts[0][1])}`;
-for(let i=1;i<capPts.length;i++){lp+=` L ${xd(capPts[i][0])} ${y(capPts[i][1])}`;ar+=` L ${xd(capPts[i][0])} ${y(capPts[i][1])}`;}
-ar+=` L ${xd(capPts[capPts.length-1][0])} ${m.t+ih} Z`;
-svg.appendChild(el('path',{d:ar,fill:'#2f6f4f',opacity:.08}));
+let lp=`M ${xd(capPts[0][0])} ${y(capPts[0][1])}`;
+for(let i=1;i<capPts.length;i++)lp+=` L ${xd(capPts[i][0])} ${y(capPts[i][1])}`;
 svg.appendChild(el('path',{d:lp,fill:'none',stroke:'#2f6f4f','stroke-width':1.6}));
-// excluding-0.10.1 counterfactual (organic baseline, spike removed)
-if(R.some(r=>r.cap_ex!=null&&r.cap_ex!==r.cap)){const exPts=clip('cap_ex_tight');
-let ep=`M ${xd(exPts[0][0])} ${y(exPts[0][1])}`;
-for(let i=1;i<exPts.length;i++)ep+=` L ${xd(exPts[i][0])} ${y(exPts[i][1])}`;
-svg.appendChild(el('path',{d:ep,fill:'none',stroke:'#3b6fb0','stroke-width':1.5,'stroke-dasharray':'5 4'}));}
 // measured exact cumulative over the daily window (takes over where the estimate stops)
 if(Mu.length>1){let mp=`M ${x(Mu[0].date)} ${y(Mu[0].cum)}`;
 for(let i=1;i<Mu.length;i++)mp+=` L ${x(Mu[i].date)} ${y(Mu[i].cum)}`;
@@ -526,9 +561,7 @@ R.forEach(r=>{if(day(r.date)>=cut)return;const bound=r.cap_tight??r.cap,cx=x(r.d
 svg.appendChild(el('circle',{cx,cy,r:2.6,fill:'#2f6f4f'}));
 const hit=el('circle',{cx,cy,r:9,fill:'transparent'});
 const lbl=r.versions.length?`v${r.versions.join(', v')} — released ${r.date}`:`today (${r.date})`;
-const exVal=r.cap_ex_tight??r.cap_ex;
-const exline=(exVal!=null&&exVal!==bound)?`\nexcl 0.10.1: ≤ ${fmt(exVal)}`:'';
-const tip=r.versions.length?`${lbl}\n+${fmt(r.added)} lifetime downloads\ncumulative ≤ ${fmt(bound)} before this release${exline}`:`${lbl}\ncumulative = ${fmt(bound)} (exact)${exline}`;
+const tip=r.versions.length?`${lbl}\n+${fmt(r.added)} lifetime downloads\ncumulative ≤ ${fmt(bound)} before this release`:`${lbl}\ncumulative = ${fmt(bound)} (exact)`;
 bindTip(hit,tip);svg.appendChild(hit);});
 (P.cumulative||[]).forEach(c=>{const dd=day(c.date);if(dd>=t0&&dd<=t1){const dot=el('circle',{cx:x(c.date),cy:y(c.total),r:4,fill:'#b04a2f'});bindTip(dot,`live capture ${c.date}\ncumulative = ${fmt(c.total)} (exact)`);svg.appendChild(dot);}});
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));

@@ -46,7 +46,7 @@ Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
 ## Current numbers
 
 <!--STATS-->
-_Updated 2026-06-24 00:49 UTC_
+_Updated 2026-06-24 01:20 UTC_
 
 - All-time downloads: **453,849**
 - Daily history reconstructed: **90 days**

@@ -306,6 +306,49 @@ def reconstruct_cumulative():
     return pts, meta
 
 
+def dominant_release():
+    """The release with the largest share of recent (windowed) downloads, with
+    the figures the caveat needs. Returns None unless an OLDER line (released
+    before the daily window) dominates recent traffic - that's the only case the
+    "pinned deps, not new adoption" framing applies to. Needs per-version daily
+    snapshots; returns None until those exist.
+    """
+    cfiles = sorted((SNAPS / "crate").glob("*.json")) if (SNAPS / "crate").exists() else []
+    vfiles = sorted((SNAPS / "version_downloads").glob("*.json")) if (SNAPS / "version_downloads").exists() else []
+    if not cfiles or not vfiles:
+        return None
+    crate = json.loads(cfiles[-1].read_text())
+    vd = json.loads(vfiles[-1].read_text())
+    total_life = crate["crate"]["downloads"]
+    life = {v["num"]: v["downloads"] for v in crate.get("versions", [])}
+    created = {v["num"]: v["created_at"][:10] for v in crate.get("versions", [])
+               if v.get("created_at")}
+    window, dates = {}, []
+    for num, raw in vd.get("versions", {}).items():
+        rows = raw.get("version_downloads", [])
+        window[num] = sum(r["downloads"] for r in rows)
+        dates += [r["date"] for r in rows]
+    total_window = sum(window.values())
+    if not dates or total_window == 0 or total_life == 0:
+        return None
+    top = max(window, key=window.get)
+    win_start = min(dates)
+    # only a meaningful caveat when an older line still dominates recent pulls
+    if created.get(top, "9999") >= win_start or window[top] / total_window < 0.30:
+        return None
+    major_minor = ".".join(top.split(".")[:2])
+    return {
+        "num": top,
+        "line": f"{major_minor}.x",
+        "lifetime": life.get(top, 0),
+        "lifetime_share": life.get(top, 0) / total_life,
+        "window_downloads": window[top],
+        "window_share": window[top] / total_window,
+        "window_start": win_start,
+        "window_end": max(dates),
+    }
+
+
 def measured_cumulative(daily, total):
     """Exact cumulative total at each day we have daily data for.
 
@@ -356,6 +399,7 @@ def main():
         "reconstruction": reconstruction,
         "reconstruction_meta": reconstruction_meta,
         "measured": measured_cumulative(daily, latest_total),
+        "dominant_release": dominant_release(),
         "cumulative": cumulative,
         "latest_total": latest_total,
         "enough_windows": 6,   # show the exponential-test chart only past this
@@ -489,7 +533,7 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 <h2 style="margin-top:48px">Estimated growth</h2>
 <p class="note" style="max-width:760px">crates.io keeps daily downloads for only ~90 days. For earlier history, this chart estimates cumulative downloads from the data crates.io does keep: each version's release date, each version's lifetime download count, and every daily download snapshot archived by this repo. Where available, per-version daily snapshots attribute old-version downloads exactly. At each release date, the estimate removes downloads that must have happened later: downloads of versions that did not exist yet, plus archived daily downloads after that date. Because old versions can keep getting pulled by lockfiles, downstream dependencies, and CI, the true historical cumulative total may be lower than the estimate.</p>
 <p class="note" id="reconmeta" style="max-width:760px"></p>
-<p class="note" style="max-width:760px"><strong>The 0.10.1 caveat.</strong> 0.10.1 is the dominant active release line. It accounts for 42% of all lifetime downloads and about half of recent measured downloads: 108,086 of its 189,797 lifetime downloads occurred from 2026-03-27 through 2026-06-23, about 51% of all slatedb downloads in that same window. This likely reflects pinned dependencies or a long-lived 0.10.x line, not necessarily new adoption accelerating.</p>
+<p class="note" id="caveat" style="max-width:760px"></p>
 
 <h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Cumulative downloads over time</h3>
 <p class="note"><span style="color:var(--accent);font-weight:600">Green</span>: estimated cumulative downloads before exact daily data begins. <span style="color:var(--fit);font-weight:600">Red</span>: exact cumulative downloads measured from archived daily data. Hover any point for the version, release date, and cumulative total.</p>
@@ -520,6 +564,11 @@ if(P.reconstruction_meta&&P.reconstruction_meta.daily_start){
 const m=P.reconstruction_meta;
 document.getElementById('reconmeta').textContent=`Archived daily data currently covers ${m.daily_start} to ${m.daily_end} across ${m.daily_days.toLocaleString()} days; ${m.exact_version_days.toLocaleString()} of those days have exact per-version attribution. The estimate attributes ${m.explicit_daily_total.toLocaleString()} downloads across ${m.explicit_version_count} versions and leaves ${m.extra_daily_total.toLocaleString()} downloads in aggregate extra_downloads where per-version detail is unavailable.`;
 }
+(function(){const c=P.dominant_release,node=document.getElementById('caveat');if(!node)return;
+if(!c){node.remove();return;}
+const pct=v=>`${Math.round(v*100)}%`;
+node.innerHTML=`<strong>The ${c.num} caveat.</strong> v${c.num} is the dominant active release line &mdash; ${pct(c.lifetime_share)} of all lifetime downloads, and ${pct(c.window_share)} of all measured downloads in the recent window (${fmt(c.window_downloads)} of its ${fmt(c.lifetime)} lifetime downloads landed between ${c.window_start} and ${c.window_end}). That likely reflects pinned dependencies or a long-lived ${c.line} line, not necessarily new adoption accelerating.`;
+})();
 
 // cumulative estimate from version release dates and archived daily data
 (function(){const svg=document.getElementById('recon'),W=920,H=300,m={t:14,r:16,b:44,l:62};

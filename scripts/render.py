@@ -135,41 +135,139 @@ def reconstruct_cumulative():
     construction credits all of those to before t. True history runs at or below
     the returned curve. The exact curve only emerges from repeated cumulative
     snapshots over time.
+    Archived /downloads snapshots tighten that ceiling. If a download is known
+    to have happened after t, it also cannot be part of cumulative(t).
+    Per-version rows can be attributed exactly; crates.io's aggregate
+    extra_downloads bucket cannot, so we subtract only the minimum amount that
+    must belong to versions released before t. Overlapping snapshots are merged
+    date-by-date with the newest snapshot authoritative for each date.
     """
     crate_dir = SNAPS / "crate"
     files = sorted(crate_dir.glob("*.json")) if crate_dir.exists() else []
     if not files:
-        return []
-    d = json.loads(files[-1].read_text())
-    vs = [(v["created_at"][:10], v["num"], v["downloads"]) for v in d.get("versions", [])
-          if v.get("created_at")]
+        return [], {}
+    snap = files[-1]
+    d = json.loads(snap.read_text())
+    vs = [
+        {
+            "date": v["created_at"][:10],
+            "num": v["num"],
+            "downloads": v["downloads"],
+            "id": v.get("id"),
+        }
+        for v in d.get("versions", [])
+        if v.get("created_at")
+    ]
     if not vs:
-        return []
+        return [], {}
     total = d["crate"]["downloads"]
-    # 0.10.1 is a one-off spike (see the "estimated growth" section copy): we also
-    # emit a counterfactual curve with it removed, to expose the organic baseline.
+    # 0.10.1 dominates the lifetime total, so emit a counterfactual curve with it
+    # removed to show how much of the reconstruction depends on that release.
     EXCLUDE = {"0.10.1"}
-    total_ex = total - sum(dl for _, num, dl in vs if num in EXCLUDE)
+    total_ex = total - sum(v["downloads"] for v in vs if v["num"] in EXCLUDE)
+
+    by_id = {v["id"]: v for v in vs if v["id"] is not None}
+    daily_evidence = {}
+    for dl_path in sorted((SNAPS / "downloads").glob("*.json")):
+        dd = json.loads(dl_path.read_text())
+        by_date = defaultdict(lambda: {"explicit": defaultdict(int), "extra": 0})
+        for r in dd.get("version_downloads", []):
+            v = by_id.get(r.get("version"))
+            if v:
+                by_date[r["date"]]["explicit"][v["num"]] += r["downloads"]
+        for r in dd.get("meta", {}).get("extra_downloads", []):
+            by_date[r["date"]]["extra"] += r["downloads"]
+        # Later snapshots win for overlapping dates, matching load_daily().
+        for date, day in by_date.items():
+            daily_evidence[date] = {
+                "snapshot": dl_path.stem,
+                "explicit": dict(day["explicit"]),
+                "extra": day["extra"],
+            }
+
+    explicit_rows = [
+        {"date": date, "num": num, "downloads": downloads}
+        for date, day in daily_evidence.items()
+        for num, downloads in day["explicit"].items()
+    ]
+    extra_rows = [
+        {"date": date, "downloads": day["extra"]}
+        for date, day in daily_evidence.items()
+        if day["extra"]
+    ]
+
+    explicit_nums = {r["num"] for r in explicit_rows}
+    release_dates = sorted({v["date"] for v in vs})
+    daily_dates = [r["date"] for r in explicit_rows] + [r["date"] for r in extra_rows]
+    meta = {
+        "crate_snapshot": snap.stem,
+        "downloads_snapshots": len(list((SNAPS / "downloads").glob("*.json"))),
+        "daily_start": min(daily_dates) if daily_dates else None,
+        "daily_end": max(daily_dates) if daily_dates else None,
+        "daily_days": len(daily_evidence),
+        "daily_total": sum(r["downloads"] for r in explicit_rows) +
+                       sum(r["downloads"] for r in extra_rows),
+        "explicit_version_count": len(explicit_nums),
+        "explicit_daily_total": sum(r["downloads"] for r in explicit_rows),
+        "extra_daily_total": sum(r["downloads"] for r in extra_rows),
+    }
+
+    def cap_at(t, exclude=frozenset()):
+        total0 = total - sum(v["downloads"] for v in vs if v["num"] in exclude)
+        future = [v for v in vs if v["date"] >= t and v["num"] not in exclude]
+        release_only_after = sum(v["downloads"] for v in future)
+        loose = total0 - release_only_after
+
+        explicit_after = 0
+        for v in vs:
+            if v["num"] in exclude or v["date"] >= t or v["num"] not in explicit_nums:
+                continue
+            known_after = sum(r["downloads"] for r in explicit_rows
+                              if r["num"] == v["num"] and r["date"] >= t)
+            explicit_after += min(known_after, v["downloads"])
+
+        extra_after = sum(r["downloads"] for r in extra_rows if r["date"] >= t)
+        future_extra_capacity = sum(
+            v["downloads"] for v in future
+            if v["num"] not in explicit_nums
+        )
+        # If a version is excluded from the counterfactual and hidden inside
+        # extra_downloads, that hidden traffic can be from the excluded release.
+        excluded_extra_capacity = sum(
+            v["downloads"] for v in vs
+            if v["num"] in exclude and v["num"] not in explicit_nums
+        )
+        extra_after_for_old_versions = max(
+            0,
+            extra_after - future_extra_capacity - excluded_extra_capacity,
+        )
+
+        tight = total0 - release_only_after - explicit_after - extra_after_for_old_versions
+        return loose, min(loose, max(0, tight))
+
     by_date = defaultdict(list)  # release date -> [(version, all-time downloads), ...]
-    for c, num, dl in vs:
-        by_date[c].append((num, dl))
+    for v in vs:
+        by_date[v["date"]].append((v["num"], v["downloads"]))
     pts = []
-    for t in sorted(by_date):
-        after = sum(dl for c, _, dl in vs if c >= t)  # downloads that can only be post-t
-        after_ex = sum(dl for c, num, dl in vs if c >= t and num not in EXCLUDE)
+    for t in release_dates:
+        cap, cap_tight = cap_at(t)
+        cap_ex, cap_ex_tight = cap_at(t, EXCLUDE)
         rel = by_date[t]
         pts.append({
             "date": t,
-            "cap": total - after,
-            "cap_ex": total_ex - after_ex,
+            "cap": cap,
+            "cap_tight": cap_tight,
+            "cap_ex": cap_ex,
+            "cap_ex_tight": cap_ex_tight,
             "versions": [v for v, _ in rel],
             # this release's lifetime downloads = the climb to the next point
             "added": sum(dl for _, dl in rel),
         })
     # snapshot day anchors each curve to its true total
-    pts.append({"date": files[-1].stem, "cap": total, "cap_ex": total_ex,
+    pts.append({"date": snap.stem, "cap": total, "cap_tight": total,
+                "cap_ex": total_ex, "cap_ex_tight": total_ex,
                 "versions": [], "added": 0})
-    return pts
+    return pts, meta
 
 
 def measured_cumulative(daily, total):
@@ -210,6 +308,8 @@ def main():
     full_months = [m for m in months if not m["partial"]]
     latest_total = cumulative[-1]["total"] if cumulative else (sum(daily.values()) if daily else 0)
 
+    reconstruction, reconstruction_meta = reconstruct_cumulative()
+
     payload = {
         "generated": generated,
         "daily": [[d, v] for d, v in daily.items()],
@@ -217,7 +317,8 @@ def main():
         "windows": wins,
         "fit": fit,
         "versions": load_versions(),
-        "reconstruction": reconstruct_cumulative(),
+        "reconstruction": reconstruction,
+        "reconstruction_meta": reconstruction_meta,
         "measured": measured_cumulative(daily, latest_total),
         "cumulative": cumulative,
         "latest_total": latest_total,
@@ -338,12 +439,18 @@ svg{display:block;max-width:100%}.tk{fill:var(--mut);font-size:10px}.gl{stroke:#
 <p class="note">Weekly sawtooth = weekday vs weekend (CI traffic).</p>
 <div class="box"><svg id="daily" width="920" height="240" viewBox="0 0 920 240"></svg><div id="daily-empty"></div></div>
 
-<h2 style="margin-top:48px">Estimated growth</h2>
-<p class="note" style="max-width:760px">crates.io keeps daily data for only ~90 days, but per-version all-time totals persist forever. Because a version can only be downloaded <em>after</em> it ships, the cumulative total at any past date was <em>at most</em> today's total minus every version released since &mdash; an upper-bound reconstruction of the whole-history curve. True history runs at or below it; the gap is older versions still being pulled (CI caches, lockfile pins). These charts are <em>estimates</em> from a single snapshot, not measured history.</p>
-<p class="note" style="max-width:760px"><strong>The 0.10.1 caveat.</strong> One release &mdash; 0.10.1 (Jan 2026) &mdash; is 42% of all downloads and drives the steep step. The evidence says it was a one-time spike, not sustained growth: at its peak it ran at ~2,600 downloads/day (near the <em>entire</em> crate's current all-version rate), and it has since decayed to &le;1,247/day while the post-spike daily baseline holds flat at ~2,360/day. So the steepness is largely one anomalous release. The <span style="color:var(--accent2);font-weight:600">excluding-0.10.1</span> curve strips that burst out to show the organic baseline &mdash; comparing the two separates real adoption from the spike. A few months still can't distinguish flat from slow-exponential; the monthly cumulative series accruing now is what ultimately settles it.</p>
+<h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Download rate</h3>
+<p class="note"><span style="color:var(--accent);font-weight:600">Green</span>: 7-day average. <span style="color:var(--accent2);font-weight:600">Blue dashed</span>: 28-day average. Measured daily data only.</p>
+<div class="box"><svg id="rate" width="920" height="240" viewBox="0 0 920 240"></svg><div id="rate-empty"></div></div>
 
-<h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Cumulative downloads over time &mdash; upper-bound reconstruction</h3>
-<p class="note"><span style="color:var(--accent);font-weight:600">Green</span>: upper-bound estimate, drawn only for the period before daily data exists. <span style="color:var(--accent2);font-weight:600">Blue dashed</span>: same estimate excluding the 0.10.1 spike. <span style="color:var(--fit);font-weight:600">Red</span>: exact cumulative measured from daily data, which takes over for the last ~90 days. Where they meet, the estimate sits well above the measured truth &mdash; that drop is the accumulated over-count (recent versions whose downloads the bound back-dates). Hover any point for the version, release date, and cumulative total.</p>
+<h2 style="margin-top:48px">Estimated growth</h2>
+<p class="note" style="max-width:760px">The long-run curve below is a constrained reconstruction, not measured history. crates.io keeps daily downloads for only ~90 days; outside that window we have per-version lifetime totals and release dates. The reconstruction uses those facts to draw the tightest upper bound this snapshot supports: it removes versions that did not exist yet, then also removes recent downloads that the 90-day endpoint proves happened after each release-date point. True cumulative downloads can be below this line; they cannot be above it without contradicting the snapshot.</p>
+<p class="note" id="reconmeta" style="max-width:760px"></p>
+<p class="note" style="max-width:760px"><strong>The 0.10.1 caveat.</strong> One release &mdash; 0.10.1 (Jan 2026) &mdash; accounts for 42% of all recorded downloads, so it dominates any historical reconstruction. The <span style="color:var(--accent2);font-weight:600">excluding-0.10.1</span> line is a counterfactual baseline: useful for seeing how much of the curve is one release, but not a measured organic-growth series.</p>
+<p class="note" style="max-width:760px"><strong>What would prove acceleration?</strong> Not this reconstruction by itself. A conclusive signal needs exact same-length download deltas from repeated captures &mdash; for example, several 90-day windows whose totals rise consistently after release spikes and weekday effects are accounted for. Until enough exact windows accumulate, the chart can rule out impossible histories above the bound, but it cannot prove sustained acceleration.</p>
+
+<h3 style="font-size:13px;font-weight:600;margin:24px 0 4px">Cumulative downloads over time &mdash; constrained upper bound</h3>
+<p class="note"><span style="color:var(--accent);font-weight:600">Green</span>: tightened upper-bound reconstruction, drawn only before exact daily data begins. <span style="color:var(--accent2);font-weight:600">Blue dashed</span>: tightened counterfactual excluding 0.10.1. <span style="color:var(--fit);font-weight:600">Red</span>: exact cumulative measured from daily data, which takes over for the last ~90 days. Hover any point for the version, release date, and cumulative total.</p>
 <div class="box"><svg id="recon" width="920" height="300" viewBox="0 0 920 300"></svg><div id="recon-empty"></div></div>
 
 <section id="winsec" hidden>
@@ -367,6 +474,10 @@ node.addEventListener('mousemove',e=>{TIP.style.left=(e.clientX+12)+'px';TIP.sty
 node.addEventListener('mouseleave',()=>{TIP.style.opacity=0;});};
 document.getElementById('sub').textContent=`Organic adoption on crates.io · updated ${P.generated}`;
 document.getElementById('alltime').textContent=P.latest_total.toLocaleString();
+if(P.reconstruction_meta&&P.reconstruction_meta.daily_start){
+const m=P.reconstruction_meta;
+document.getElementById('reconmeta').textContent=`Archived daily constraint: daily data covers ${m.daily_start} to ${m.daily_end} across ${m.daily_days.toLocaleString()} days. crates.io attributes ${m.explicit_daily_total.toLocaleString()} downloads across ${m.explicit_version_count} explicit versions and buckets ${m.extra_daily_total.toLocaleString()} more as aggregate extra_downloads, so old-version attribution remains partly unknown.`;
+}
 
 // cumulative upper-bound reconstruction (from per-version release dates)
 (function(){const svg=document.getElementById('recon'),W=920,H=300,m={t:14,r:16,b:44,l:62};
@@ -375,7 +486,7 @@ if(R.length<2){document.getElementById('recon-empty').className='empty';document
 const iw=W-m.l-m.r,ih=H-m.t-m.b;
 const day=s=>{const a=s.split('-').map(Number);return Date.UTC(a[0],a[1]-1,a[2])/864e5;};
 const t0=day(R[0].date),t1=day(R[R.length-1].date),span=Math.max(1,t1-t0);
-const max=Math.max(P.latest_total,...R.map(r=>r.cap)),step=Math.max(50000,Math.round(max/5/50000)*50000),maxR=Math.ceil(max/step)*step;
+const max=Math.max(P.latest_total,...R.map(r=>r.cap_tight??r.cap)),step=Math.max(50000,Math.round(max/5/50000)*50000),maxR=Math.ceil(max/step)*step;
 const xd=dn=>m.l+iw*(dn-t0)/span,x=s=>xd(day(s)),y=v=>m.t+ih-ih*v/maxR;
 for(let g=0;g<=maxR;g+=step){const yy=y(g);
 svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
@@ -383,18 +494,19 @@ svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).text
 // the estimate is only drawn for dates BEFORE measured daily data begins; past that, the red line is exact
 const Mu=P.measured||[];
 const cut=Mu.length?day(Mu[0].date):Infinity;
-const clip=field=>{const out=[];for(let i=0;i<R.length;i++){const di=day(R[i].date);
-if(di<cut)out.push([di,R[i][field]]);
-else{const p=out[out.length-1];if(p&&p[0]<cut){const f=(cut-p[0])/(di-p[0]);out.push([cut,p[1]+(R[i][field]-p[1])*f]);}break;}}
+const val=(r,field)=>r[field]??r.cap;
+const clip=field=>{const out=[];for(let i=0;i<R.length;i++){const di=day(R[i].date),vi=val(R[i],field);
+if(di<cut)out.push([di,vi]);
+else{const p=out[out.length-1];if(p&&p[0]<cut){const f=(cut-p[0])/(di-p[0]);out.push([cut,p[1]+(vi-p[1])*f]);}break;}}
 return out;};
-const capPts=clip('cap');
+const capPts=clip('cap_tight');
 let lp=`M ${xd(capPts[0][0])} ${y(capPts[0][1])}`,ar=`M ${xd(capPts[0][0])} ${m.t+ih} L ${xd(capPts[0][0])} ${y(capPts[0][1])}`;
 for(let i=1;i<capPts.length;i++){lp+=` L ${xd(capPts[i][0])} ${y(capPts[i][1])}`;ar+=` L ${xd(capPts[i][0])} ${y(capPts[i][1])}`;}
 ar+=` L ${xd(capPts[capPts.length-1][0])} ${m.t+ih} Z`;
 svg.appendChild(el('path',{d:ar,fill:'#2f6f4f',opacity:.08}));
 svg.appendChild(el('path',{d:lp,fill:'none',stroke:'#2f6f4f','stroke-width':1.6}));
 // excluding-0.10.1 counterfactual (organic baseline, spike removed)
-if(R.some(r=>r.cap_ex!=null&&r.cap_ex!==r.cap)){const exPts=clip('cap_ex');
+if(R.some(r=>r.cap_ex!=null&&r.cap_ex!==r.cap)){const exPts=clip('cap_ex_tight');
 let ep=`M ${xd(exPts[0][0])} ${y(exPts[0][1])}`;
 for(let i=1;i<exPts.length;i++)ep+=` L ${xd(exPts[i][0])} ${y(exPts[i][1])}`;
 svg.appendChild(el('path',{d:ep,fill:'none',stroke:'#3b6fb0','stroke-width':1.5,'stroke-dasharray':'5 4'}));}
@@ -410,12 +522,13 @@ svg.appendChild(el('circle',{cx,cy,r:3,fill:'#b04a2f'}));
 const hit=el('circle',{cx,cy,r:9,fill:'transparent'});
 bindTip(hit,`v${r.versions.join(', v')} — released ${r.date}\ncumulative = ${fmt(cumAt[r.date])} (exact, measured)\n+${fmt(r.added)} lifetime downloads`);
 svg.appendChild(hit);});}
-R.forEach(r=>{if(day(r.date)>=cut)return;const cx=x(r.date),cy=y(r.cap);
+R.forEach(r=>{if(day(r.date)>=cut)return;const bound=r.cap_tight??r.cap,cx=x(r.date),cy=y(bound);
 svg.appendChild(el('circle',{cx,cy,r:2.6,fill:'#2f6f4f'}));
 const hit=el('circle',{cx,cy,r:9,fill:'transparent'});
 const lbl=r.versions.length?`v${r.versions.join(', v')} — released ${r.date}`:`today (${r.date})`;
-const exline=(r.cap_ex!=null&&r.cap_ex!==r.cap)?`\nexcl 0.10.1: ≤ ${fmt(r.cap_ex)}`:'';
-const tip=r.versions.length?`${lbl}\n+${fmt(r.added)} lifetime downloads\ncumulative ≤ ${fmt(r.cap)} before this release${exline}`:`${lbl}\ncumulative = ${fmt(r.cap)} (exact)${exline}`;
+const exVal=r.cap_ex_tight??r.cap_ex;
+const exline=(exVal!=null&&exVal!==bound)?`\nexcl 0.10.1: ≤ ${fmt(exVal)}`:'';
+const tip=r.versions.length?`${lbl}\n+${fmt(r.added)} lifetime downloads\ncumulative ≤ ${fmt(bound)} before this release${exline}`:`${lbl}\ncumulative = ${fmt(bound)} (exact)${exline}`;
 bindTip(hit,tip);svg.appendChild(hit);});
 (P.cumulative||[]).forEach(c=>{const dd=day(c.date);if(dd>=t0&&dd<=t1){const dot=el('circle',{cx:x(c.date),cy:y(c.total),r:4,fill:'#b04a2f'});bindTip(dot,`live capture ${c.date}\ncumulative = ${fmt(c.total)} (exact)`);svg.appendChild(dot);}});
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
@@ -463,6 +576,25 @@ D.forEach((d,i)=>{if(i){pa+=` L ${x(i)} ${y(d[1])}`;ar+=` L ${x(i)} ${y(d[1])}`;
 ar+=` L ${x(D.length-1)} ${m.t+ih} Z`;
 svg.appendChild(el('path',{d:ar,fill:'#2f6f4f',opacity:.10}));
 svg.appendChild(el('path',{d:pa,fill:'none',stroke:'#2f6f4f','stroke-width':1.5}));
+svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
+const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);})();
+
+// measured download-rate rolling averages
+(function(){const svg=document.getElementById('rate'),W=920,H=240,m={t:12,r:58,b:28,l:48};
+const D=P.daily;if(D.length<7){document.getElementById('rate-empty').className='empty';document.getElementById('rate-empty').textContent='Need at least 7 days.';svg.remove();return;}
+const roll=w=>{const out=[];let sum=0;D.forEach((d,i)=>{sum+=d[1];if(i>=w)sum-=D[i-w][1];if(i>=w-1)out.push({i,date:d[0],v:sum/w,w});});return out;};
+const R7=roll(7),R28=D.length>=28?roll(28):[];
+const vals=R7.concat(R28).map(p=>p.v),max=Math.max(...vals),step=Math.max(500,Math.round(max/5/500)*500),maxR=Math.ceil(max/step)*step;
+const iw=W-m.l-m.r,ih=H-m.t-m.b,x=i=>m.l+iw*i/(D.length-1),y=v=>m.t+ih-ih*v/maxR;
+svg.appendChild(el('text',{class:'tk',x:14,y:H/2,'text-anchor':'middle',transform:`rotate(-90 14 ${H/2})`})).textContent='downloads/day';
+for(let g=0;g<=maxR;g+=step){const yy=y(g);
+svg.appendChild(el('line',{class:'gl',x1:m.l,y1:yy,x2:W-m.r,y2:yy}));
+svg.appendChild(el('text',{class:'tk',x:m.l-6,y:yy+3,'text-anchor':'end'})).textContent=(g/1000)+'k';}
+const draw=(pts,color,dash)=>{if(!pts.length)return;let path=`M ${x(pts[0].i)} ${y(pts[0].v)}`;
+for(let i=1;i<pts.length;i++)path+=` L ${x(pts[i].i)} ${y(pts[i].v)}`;
+svg.appendChild(el('path',{d:path,fill:'none',stroke:color,'stroke-width':dash?1.5:1.8,'stroke-dasharray':dash?'5 4':''}));
+const last=pts[pts.length-1];svg.appendChild(el('text',{class:'tk',x:x(last.i)+6,y:y(last.v)+3,fill:color})).textContent=`${last.w}d`;};
+draw(R7,'#2f6f4f',false);draw(R28,'#3b6fb0',true);
 svg.appendChild(el('line',{class:'axis',x1:m.l,y1:m.t+ih,x2:W-m.r,y2:m.t+ih}));
 const anc=['start','middle','end'];[0,Math.floor(D.length/2),D.length-1].forEach((i,k)=>svg.appendChild(el('text',{class:'tk',x:x(i),y:H-10,'text-anchor':anc[k]})).textContent=D[i][0]);})();
 

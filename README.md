@@ -51,11 +51,11 @@ Run locally: `python3 scripts/capture.py && python3 scripts/render.py`
 ## Current numbers
 
 <!--STATS-->
-_Updated 2026-08-01 06:53 UTC_
+_Updated 2026-09-01 06:20 UTC_
 
-- All-time downloads: **647,796**
-- Daily history reconstructed: **129 days**
-- Full calendar months: **4**
+- All-time downloads: **1,085,412**
+- Daily history reconstructed: **160 days**
+- Full calendar months: **5**
 - 90-day-window exponential fit: _pending_ (1 of ~6 windows captured)
 
 See the live dashboard: **https://responsivedev.github.io/slatedb-stats/**
